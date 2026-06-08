@@ -6,6 +6,7 @@ const refreshBtn = document.querySelector("#refreshBtn");
 const disconnectBtn = document.querySelector("#disconnectBtn");
 const connectionState = document.querySelector("#connectionState");
 const hubTitle = document.querySelector("#hubTitle");
+const modelValue = document.querySelector("#modelValue");
 const firmwareValue = document.querySelector("#firmwareValue");
 const profileValue = document.querySelector("#profileValue");
 const writeSizeValue = document.querySelector("#writeSizeValue");
@@ -147,12 +148,25 @@ function renderPortRow(port) {
 
 function mergePorts(scannedPorts) {
   const scannedByName = new Map(scannedPorts.map((port) => [port.port, port]));
-  return PORT_NAMES.map((port) => scannedByName.get(port) ?? { port, status: "unavailable" });
+  return currentPortNames().map((port) => scannedByName.get(port) ?? { port, status: "unavailable" });
+}
+
+function currentHubModel() {
+  return state.hub?.model ?? {
+    name: "Unknown Pybricks Hub",
+    ports: PORT_NAMES,
+    portRows: [["A", "B"], ["C", "D"], ["E", "F"]]
+  };
+}
+
+function currentPortNames() {
+  return currentHubModel().ports;
 }
 
 function renderPorts() {
-  const left = state.ports.filter((port) => ["A", "C", "E"].includes(port.port));
-  const right = state.ports.filter((port) => ["B", "D", "F"].includes(port.port));
+  const portsByName = new Map(state.ports.map((port) => [port.port, port]));
+  const left = currentHubModel().portRows.map(([port]) => portsByName.get(port)).filter(Boolean);
+  const right = currentHubModel().portRows.map(([, port]) => portsByName.get(port)).filter(Boolean);
   const deviceCount = state.ports.filter((port) => port.status === "device" || port.status === "unknown").length;
 
   leftPorts.replaceChildren(...left.map(renderPortTile));
@@ -164,6 +178,7 @@ function renderPorts() {
 function renderHub() {
   const hub = state.hub;
   hubTitle.textContent = hub?.name || "No hub selected";
+  modelValue.textContent = hub?.model?.name || "-";
   firmwareValue.textContent = hub?.firmwareVersion || "-";
   profileValue.textContent = hub?.profileVersion || "-";
   writeSizeValue.textContent = state.capabilities?.maxWriteSize ? `${state.capabilities.maxWriteSize} bytes` : "-";
@@ -175,7 +190,7 @@ function resetUiAfterDisconnect() {
   state.connected = false;
   state.hub = null;
   state.capabilities = null;
-  state.ports = makeInitialPorts();
+  state.ports = makeInitialPorts("unavailable");
   scanStamp.textContent = "Not scanned";
   setConnectionState("Disconnected", "idle");
   setBusy(false);
@@ -209,6 +224,7 @@ connectBtn.addEventListener("click", async () => {
     state.connected = true;
     state.hub = info;
     state.capabilities = capabilities;
+    state.ports = makeInitialPorts("unavailable", currentPortNames());
     setConnectionState("Connected", "ready");
     renderHub();
     await refreshPorts();

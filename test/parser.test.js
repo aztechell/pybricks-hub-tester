@@ -2,10 +2,12 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   deviceNameForId,
+  makeInitialPorts,
   parseHubCapabilities,
   parsePnpId,
   parseScanOutput,
   parseSemver,
+  resolveHubModel,
   supportsWriteStdin,
   usesBuiltinRepl
 } from "../src/parser.js";
@@ -83,9 +85,20 @@ describe("parser", () => {
 
     assert.deepEqual(parsePnpId(data), {
       vendorIdSource: 1,
+      vendorIdSourceName: "Bluetooth",
       vendorId: 919,
       productId: 65,
       productVersion: 2
     });
+  });
+
+  it("resolves hub models and real ports from PnP product IDs", () => {
+    assert.deepEqual(resolveHubModel({ productId: 128 }).ports, ["A", "B", "C", "D"]);
+    assert.deepEqual(resolveHubModel({ productId: 128 }).portRows, [["A", "B"], ["C", "D"]]);
+    assert.equal(resolveHubModel({ productId: 129, productVersion: 1 }).name, "Inventor Hub");
+    assert.deepEqual(makeInitialPorts("unavailable", resolveHubModel({ productId: 65 }).ports), [
+      { port: "A", status: "unavailable" },
+      { port: "B", status: "unavailable" }
+    ]);
   });
 });

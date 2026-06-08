@@ -1,5 +1,45 @@
 export const PORT_NAMES = Object.freeze(["A", "B", "C", "D", "E", "F"]);
 
+export const HUB_MODELS = Object.freeze({
+  64: {
+    id: 64,
+    name: "BOOST Move Hub",
+    ports: ["A", "B", "C", "D"],
+    portRows: [["A", "B"], ["C", "D"]]
+  },
+  65: {
+    id: 65,
+    name: "City Hub",
+    ports: ["A", "B"],
+    portRows: [["A", "B"]]
+  },
+  128: {
+    id: 128,
+    name: "Technic Hub",
+    ports: ["A", "B", "C", "D"],
+    portRows: [["A", "B"], ["C", "D"]]
+  },
+  129: {
+    id: 129,
+    name: "Prime Hub",
+    ports: ["A", "B", "C", "D", "E", "F"],
+    portRows: [["A", "B"], ["C", "D"], ["E", "F"]]
+  },
+  131: {
+    id: 131,
+    name: "Essential Hub",
+    ports: ["A", "B"],
+    portRows: [["A", "B"]]
+  }
+});
+
+export const UNKNOWN_HUB_MODEL = Object.freeze({
+  id: null,
+  name: "Unknown Pybricks Hub",
+  ports: PORT_NAMES,
+  portRows: [["A", "B"], ["C", "D"], ["E", "F"]]
+});
+
 export const DEVICE_NAMES = Object.freeze({
   1: "Wedo 2.0 Medium Motor",
   2: "Powered Up Train Motor",
@@ -115,14 +155,30 @@ export function parsePnpId(value) {
 
   return {
     vendorIdSource: view.getUint8(0),
+    vendorIdSourceName: view.getUint8(0) === 1 ? "Bluetooth" : "USB",
     vendorId: view.getUint16(1, true),
     productId: view.getUint16(3, true),
     productVersion: view.getUint16(5, true)
   };
 }
 
-export function makeInitialPorts(status = "unavailable") {
-  return PORT_NAMES.map((port) => ({ port, status }));
+export function resolveHubModel(pnpId) {
+  if (!pnpId) {
+    return UNKNOWN_HUB_MODEL;
+  }
+
+  if (pnpId.productId === 129 && pnpId.productVersion === 1) {
+    return {
+      ...HUB_MODELS[129],
+      name: "Inventor Hub"
+    };
+  }
+
+  return HUB_MODELS[pnpId.productId] ?? UNKNOWN_HUB_MODEL;
+}
+
+export function makeInitialPorts(status = "unavailable", ports = PORT_NAMES) {
+  return ports.map((port) => ({ port, status }));
 }
 
 export function parseScanOutput(text, nonce) {

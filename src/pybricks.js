@@ -4,6 +4,7 @@ import {
   parsePnpId,
   parseScanOutput,
   parseSemver,
+  resolveHubModel,
   supportsWriteStdin,
   usesBuiltinRepl
 } from "./parser.js";
@@ -36,6 +37,7 @@ const STATUS = Object.freeze({
   USER_PROGRAM_RUNNING: 1 << 6
 });
 
+const SAFE_WRITE_STDIN_PAYLOAD_SIZE = 19;
 const sleep = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
 
 function dataViewToBytes(view, start = 0) {
@@ -52,7 +54,16 @@ function makeNonce() {
   return `${random[0].toString(16)}${random[1].toString(16)}`;
 }
 
-function makePortScanProgram(nonce) {
+function commandName(command) {
+  return (
+    Object.entries(COMMAND).find(([, value]) => value === command)?.[0].toLowerCase().replaceAll("_", " ") ??
+    `command ${command}`
+  );
+}
+
+function makePortScanProgram(nonce, ports) {
+  const portList = (ports.length ? ports : ["A", "B", "C", "D", "E", "F"]).map((port) => `"${port}"`).join(", ");
+
   return `
 from pybricks.iodevices import PUPDevice
 from pybricks.parameters import Port
@@ -62,7 +73,7 @@ except ImportError:
     ENODEV = 19
 
 print("PBHT_BEGIN:${nonce}")
-for name in ("A", "B", "C", "D", "E", "F"):
+for name in (${portList},):
     try:
         port = getattr(Port, name)
     except AttributeError:
@@ -98,6 +109,7 @@ export class PybricksHubClient extends EventTarget {
     this.info = null;
     this.stdout = "";
     this.statusFlags = 0;
+    this.hasStatusReport = false;
     this.stdoutDecoder = new TextDecoder();
   }
 
@@ -182,15 +194,16 @@ export class PybricksHubClient extends EventTarget {
     }
 
     const nonce = makeNonce();
-    const code = makePortScanProgram(nonce);
+    const code = makePortScanProgram(nonce, this.info?.model?.ports ?? ["A", "B", "C", "D", "E", "F"]);
     const command = `exec(${JSON.stringify(code)})\r\n`;
 
     this.stdout = "";
     this.stdoutDecoder = new TextDecoder();
-    await this.writeCommand(COMMAND.STOP_USER_PROGRAM);
-    await sleep(450);
+    await this.writeCommand(COMMAND.STOP_USER_PROGRAM, undefined, "stop current program");
+    await this.#waitForProgramRunning(false, 3000);
     await this.#startRepl();
-    await sleep(650);
+    await this.#waitForProgramRunning(true, 1500);
+    await sleep(200);
     this.stdout = "";
 
     const resultPromise = this.#waitForScan(nonce, 10000);
@@ -200,14 +213,17 @@ export class PybricksHubClient extends EventTarget {
 
   async writeStdin(text) {
     const bytes = new TextEncoder().encode(text);
-    const maxPayloadSize = Math.max(1, Math.min(128, this.capabilities.maxWriteSize - 1 || 19));
+    const maxPayloadSize = Math.max(
+      1,
+      Math.min(SAFE_WRITE_STDIN_PAYLOAD_SIZE, this.capabilities.maxWriteSize - 1 || SAFE_WRITE_STDIN_PAYLOAD_SIZE)
+    );
 
     for (let offset = 0; offset < bytes.length; offset += maxPayloadSize) {
-      await this.writeCommand(COMMAND.WRITE_STDIN, bytes.slice(offset, offset + maxPayloadSize));
+      await this.writeCommand(COMMAND.WRITE_STDIN, bytes.slice(offset, offset + maxPayloadSize), "send scan code");
     }
   }
 
-  async writeCommand(command, payload = new Uint8Array()) {
+  async writeCommand(command, payload = new Uint8Array(), context = commandName(command)) {
     if (!this.commandEventCharacteristic) {
       throw new Error("Command characteristic is not ready.");
     }
@@ -216,12 +232,16 @@ export class PybricksHubClient extends EventTarget {
     message[0] = command;
     message.set(payload, 1);
 
-    if ("writeValueWithResponse" in this.commandEventCharacteristic) {
-      await this.commandEventCharacteristic.writeValueWithResponse(message);
-      return;
-    }
+    try {
+      if ("writeValueWithResponse" in this.commandEventCharacteristic) {
+        await this.commandEventCharacteristic.writeValueWithResponse(message);
+        return;
+      }
 
-    await this.commandEventCharacteristic.writeValue(message);
+      await this.commandEventCharacteristic.writeValue(message);
+    } catch (error) {
+      throw new Error(`${context}: ${error.message || String(error)}`);
+    }
   }
 
   async #startRepl() {
@@ -232,11 +252,11 @@ export class PybricksHubClient extends EventTarget {
     }
 
     if (usesBuiltinRepl(protocol)) {
-      await this.writeCommand(COMMAND.START_USER_PROGRAM, new Uint8Array([BUILTIN_PROGRAM.REPL]));
+      await this.writeCommand(COMMAND.START_USER_PROGRAM, new Uint8Array([BUILTIN_PROGRAM.REPL]), "start REPL");
       return;
     }
 
-    await this.writeCommand(COMMAND.START_REPL);
+    await this.writeCommand(COMMAND.START_REPL, undefined, "start REPL");
   }
 
   async #readHubInfo() {
@@ -259,10 +279,14 @@ export class PybricksHubClient extends EventTarget {
         ...defaults,
         firmwareVersion,
         profileVersion,
-        pnpId
+        pnpId,
+        model: resolveHubModel(pnpId)
       };
     } catch {
-      return defaults;
+      return {
+        ...defaults,
+        model: resolveHubModel(defaults.pnpId)
+      };
     }
   }
 
@@ -301,12 +325,44 @@ export class PybricksHubClient extends EventTarget {
     });
   }
 
+  #isUserProgramRunning() {
+    return Boolean(this.statusFlags & STATUS.USER_PROGRAM_RUNNING);
+  }
+
+  #waitForProgramRunning(expected, timeoutMs) {
+    if (this.hasStatusReport && this.#isUserProgramRunning() === expected) {
+      return Promise.resolve(true);
+    }
+
+    return new Promise((resolve) => {
+      const timeoutId = window.setTimeout(() => {
+        cleanup();
+        resolve(false);
+      }, timeoutMs);
+
+      const onStatus = () => {
+        if (this.#isUserProgramRunning() === expected) {
+          cleanup();
+          resolve(true);
+        }
+      };
+
+      const cleanup = () => {
+        window.clearTimeout(timeoutId);
+        this.removeEventListener("status", onStatus);
+      };
+
+      this.addEventListener("status", onStatus);
+    });
+  }
+
   #handleNotification = (event) => {
     const view = event.target.value;
     const eventType = view.getUint8(0);
 
     if (eventType === EVENT.STATUS_REPORT && view.byteLength >= 5) {
       this.statusFlags = view.getUint32(1, true);
+      this.hasStatusReport = true;
       this.dispatchEvent(
         new CustomEvent("status", {
           detail: {
@@ -346,5 +402,6 @@ export class PybricksHubClient extends EventTarget {
     this.stdout = "";
     this.stdoutDecoder = new TextDecoder();
     this.statusFlags = 0;
+    this.hasStatusReport = false;
   }
 }
