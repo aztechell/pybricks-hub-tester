@@ -195,23 +195,26 @@ export class PybricksHubClient extends EventTarget {
 
     const nonce = makeNonce();
     const code = makePortScanProgram(nonce, this.info?.model?.ports ?? ["A", "B", "C", "D", "E", "F"]);
-    const command = `exec(${JSON.stringify(code)})\r\n`;
+    const command = `\x05${code.replace(/\n/g, "\r\n")}\r\n\x04`;
 
     this.stdout = "";
     this.stdoutDecoder = new TextDecoder();
     await this.writeCommand(COMMAND.STOP_USER_PROGRAM, undefined, "stop current program");
     await this.#waitForProgramRunning(false, 3000);
     await this.#startRepl();
-    await this.#waitForProgramRunning(true, 1500);
-    await sleep(200);
+    await this.#waitForProgramRunning(true, 5000);
+    await sleep(300);
+    this.stdout = "";
+    await this.writeStdin("\x03\r", "wake REPL");
+    await this.#waitForStdout((text) => text.includes(">>>") || text.includes("KeyboardInterrupt"), 3000);
     this.stdout = "";
 
-    const resultPromise = this.#waitForScan(nonce, 10000);
-    await this.writeStdin(command);
+    const resultPromise = this.#waitForScan(nonce, 20000);
+    await this.writeStdin(command, "send scan code");
     return resultPromise;
   }
 
-  async writeStdin(text) {
+  async writeStdin(text, context = "send stdin") {
     const bytes = new TextEncoder().encode(text);
     const maxPayloadSize = Math.max(
       1,
@@ -219,7 +222,7 @@ export class PybricksHubClient extends EventTarget {
     );
 
     for (let offset = 0; offset < bytes.length; offset += maxPayloadSize) {
-      await this.writeCommand(COMMAND.WRITE_STDIN, bytes.slice(offset, offset + maxPayloadSize), "send scan code");
+      await this.writeCommand(COMMAND.WRITE_STDIN, bytes.slice(offset, offset + maxPayloadSize), context);
     }
   }
 
@@ -304,7 +307,14 @@ export class PybricksHubClient extends EventTarget {
     return new Promise((resolve, reject) => {
       const timeoutId = window.setTimeout(() => {
         cleanup();
-        reject(new Error("Timed out waiting for port scan output."));
+        const output = this.#stdoutPreview();
+        reject(
+          new Error(
+            output
+              ? `Timed out waiting for port scan output. Last hub output: ${output}`
+              : "Timed out waiting for port scan output. REPL did not return stdout."
+          )
+        );
       }, timeoutMs);
 
       const onStdout = () => {
@@ -323,6 +333,37 @@ export class PybricksHubClient extends EventTarget {
 
       this.addEventListener("stdout", onStdout);
     });
+  }
+
+  #waitForStdout(predicate, timeoutMs) {
+    if (predicate(this.stdout)) {
+      return Promise.resolve(true);
+    }
+
+    return new Promise((resolve) => {
+      const timeoutId = window.setTimeout(() => {
+        cleanup();
+        resolve(false);
+      }, timeoutMs);
+
+      const onStdout = () => {
+        if (predicate(this.stdout)) {
+          cleanup();
+          resolve(true);
+        }
+      };
+
+      const cleanup = () => {
+        window.clearTimeout(timeoutId);
+        this.removeEventListener("stdout", onStdout);
+      };
+
+      this.addEventListener("stdout", onStdout);
+    });
+  }
+
+  #stdoutPreview() {
+    return this.stdout.replace(/\s+/g, " ").trim().slice(-180);
   }
 
   #isUserProgramRunning() {
