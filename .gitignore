@@ -1,4 +1,8 @@
 node_modules/
 dist/
+.venv/
+diagnostics/
+__pycache__/
+*.pyc
 *.log
 screen.png

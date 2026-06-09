@@ -4,30 +4,35 @@ export const HUB_MODELS = Object.freeze({
   64: {
     id: 64,
     name: "BOOST Move Hub",
+    hubClass: "MoveHub",
     ports: ["A", "B", "C", "D"],
     portRows: [["A", "B"], ["C", "D"]]
   },
   65: {
     id: 65,
     name: "City Hub",
+    hubClass: "CityHub",
     ports: ["A", "B"],
     portRows: [["A", "B"]]
   },
   128: {
     id: 128,
     name: "Technic Hub",
+    hubClass: "TechnicHub",
     ports: ["A", "B", "C", "D"],
     portRows: [["A", "B"], ["C", "D"]]
   },
   129: {
     id: 129,
     name: "Prime Hub",
+    hubClass: "PrimeHub",
     ports: ["A", "B", "C", "D", "E", "F"],
     portRows: [["A", "B"], ["C", "D"], ["E", "F"]]
   },
   131: {
     id: 131,
     name: "Essential Hub",
+    hubClass: "EssentialHub",
     ports: ["A", "B"],
     portRows: [["A", "B"]]
   }
@@ -36,6 +41,7 @@ export const HUB_MODELS = Object.freeze({
 export const UNKNOWN_HUB_MODEL = Object.freeze({
   id: null,
   name: "Unknown Pybricks Hub",
+  hubClass: null,
   ports: PORT_NAMES,
   portRows: [["A", "B"], ["C", "D"], ["E", "F"]]
 });
@@ -170,7 +176,8 @@ export function resolveHubModel(pnpId) {
   if (pnpId.productId === 129 && pnpId.productVersion === 1) {
     return {
       ...HUB_MODELS[129],
-      name: "Inventor Hub"
+      name: "Inventor Hub",
+      hubClass: "InventorHub"
     };
   }
 
@@ -185,11 +192,12 @@ export function parseScanOutput(text, nonce) {
   const byPort = new Map();
   const begin = `PBHT_BEGIN:${nonce}`;
   const end = `PBHT_END:${nonce}`;
+  let battery = null;
   let started = false;
   let complete = false;
 
-  for (const rawLine of String(text).split(/\r?\n/)) {
-    const line = rawLine.trim();
+  for (const rawLine of String(text).split(/[\r\n]+/)) {
+    const line = rawLine.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "").trim();
 
     if (line === begin) {
       started = true;
@@ -202,6 +210,56 @@ export function parseScanOutput(text, nonce) {
     }
 
     const parts = line.split(":");
+
+    if (parts[0] === "X" && parts[1] === nonce) {
+      complete = true;
+      continue;
+    }
+
+    if (parts.length >= 4 && parts[0] === "B" && parts[1] === nonce) {
+      const [, , status, value] = parts;
+
+      if (status === "V") {
+        const voltageMv = Number(value);
+        battery = Number.isFinite(voltageMv) ? { status: "voltage", voltageMv } : { status: "unknown" };
+      } else if (status === "X") {
+        battery = { status: "error", error: value || "Error" };
+      }
+
+      continue;
+    }
+
+    if (parts.length >= 5 && parts[0] === "P" && parts[1] === nonce) {
+      const [, , port, status, ...rest] = parts;
+      const value = rest.join(":");
+
+      if (!PORT_NAMES.includes(port)) {
+        continue;
+      }
+
+      if (status === "E") {
+        byPort.set(port, { port, status: "empty" });
+        continue;
+      }
+
+      if (status === "D") {
+        const deviceId = Number(value);
+
+        byPort.set(port, {
+          port,
+          status: Number.isFinite(deviceId) ? "device" : "unknown",
+          deviceId: Number.isFinite(deviceId) ? deviceId : null,
+          deviceName: Number.isFinite(deviceId) ? deviceNameForId(deviceId) : "Unknown"
+        });
+        continue;
+      }
+
+      if (status === "X") {
+        byPort.set(port, { port, status: "error", error: value || "Error" });
+      }
+
+      continue;
+    }
 
     if (parts.length < 5 || parts[0] !== "PBHT_PORT" || parts[1] !== nonce) {
       continue;
@@ -239,6 +297,7 @@ export function parseScanOutput(text, nonce) {
   return {
     started,
     complete,
+    battery,
     ports: [...byPort.values()].sort((a, b) => PORT_NAMES.indexOf(a.port) - PORT_NAMES.indexOf(b.port))
   };
 }

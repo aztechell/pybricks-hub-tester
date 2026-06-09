@@ -9,16 +9,29 @@ const hubTitle = document.querySelector("#hubTitle");
 const modelValue = document.querySelector("#modelValue");
 const firmwareValue = document.querySelector("#firmwareValue");
 const profileValue = document.querySelector("#profileValue");
+const batteryValue = document.querySelector("#batteryValue");
 const writeSizeValue = document.querySelector("#writeSizeValue");
 const scanStamp = document.querySelector("#scanStamp");
 const hubScreenText = document.querySelector("#hubScreenText");
+const hubThumbPlaceholder = document.querySelector("#hubThumbPlaceholder");
+const hubThumbImage = document.querySelector("#hubThumbImage");
+const hubDashboard = document.querySelector("#hubDashboard");
 const leftPorts = document.querySelector("#leftPorts");
 const rightPorts = document.querySelector("#rightPorts");
-const portList = document.querySelector("#portList");
 const portCount = document.querySelector("#portCount");
 const messageBox = document.querySelector("#messageBox");
+const hubPortLabels = [...document.querySelectorAll("[data-hub-port]")];
 
 const client = new PybricksHubClient();
+
+const HUB_IMAGE_BASE = "./assets/pybricks-hubs";
+const HUB_IMAGE_BY_PRODUCT_ID = Object.freeze({
+  64: "hub-move.png",
+  65: "hub-city.png",
+  128: "hub-technic.png",
+  129: "hub-prime.png",
+  131: "hub-essential.png"
+});
 
 const state = {
   connected: false,
@@ -108,41 +121,28 @@ function describePort(port) {
   };
 }
 
-function renderPortTile(port) {
+function renderPortTile(port, rowIndex = 0) {
   const description = describePort(port);
   const element = document.createElement("div");
-  const socket = document.createElement("div");
+  const icon = document.createElement("div");
+  const iconCore = document.createElement("span");
   const content = document.createElement("div");
-  const name = document.createElement("div");
   const device = document.createElement("div");
+  const detail = document.createElement("div");
 
-  element.className = portClass(port);
-  socket.className = "port-socket";
-  socket.textContent = port.port;
-  name.className = "port-name";
-  name.textContent = `Port ${port.port}`;
+  element.className = `${portClass(port)} port-tile--row-${rowIndex + 1}`;
+  element.title = `${description.label}. ${description.detail}`;
+  icon.className = "device-icon";
+  icon.setAttribute("aria-hidden", "true");
+  iconCore.className = "device-icon__core";
+  icon.append(iconCore);
+  content.className = "port-content";
   device.className = "port-device";
   device.textContent = description.label;
-  content.append(name, device);
-  element.append(socket, content);
-  return element;
-}
-
-function renderPortRow(port) {
-  const description = describePort(port);
-  const element = document.createElement("div");
-  const badge = document.createElement("div");
-  const content = document.createElement("div");
-  const label = document.createElement("strong");
-  const detail = document.createElement("span");
-
-  element.className = "port-row";
-  badge.className = "port-badge";
-  badge.textContent = port.port;
-  label.textContent = description.label;
+  detail.className = "port-detail";
   detail.textContent = description.detail;
-  content.append(label, detail);
-  element.append(badge, content);
+  content.append(device, detail);
+  element.append(icon, content);
   return element;
 }
 
@@ -163,15 +163,30 @@ function currentPortNames() {
   return currentHubModel().ports;
 }
 
+function hubImageSrc(hub) {
+  const model = hub?.model;
+
+  if (model?.name === "Inventor Hub") {
+    return `${HUB_IMAGE_BASE}/hub-inventor.png`;
+  }
+
+  const fileName = HUB_IMAGE_BY_PRODUCT_ID[model?.id] || "hub-prime.png";
+  return `${HUB_IMAGE_BASE}/${fileName}`;
+}
+
 function renderPorts() {
   const portsByName = new Map(state.ports.map((port) => [port.port, port]));
   const left = currentHubModel().portRows.map(([port]) => portsByName.get(port)).filter(Boolean);
   const right = currentHubModel().portRows.map(([, port]) => portsByName.get(port)).filter(Boolean);
   const deviceCount = state.ports.filter((port) => port.status === "device" || port.status === "unknown").length;
+  const activePorts = new Set(currentPortNames());
 
+  hubDashboard.dataset.portCount = String(currentPortNames().length);
+  hubPortLabels.forEach((label) => {
+    label.hidden = !activePorts.has(label.dataset.hubPort);
+  });
   leftPorts.replaceChildren(...left.map(renderPortTile));
   rightPorts.replaceChildren(...right.map(renderPortTile));
-  portList.replaceChildren(...state.ports.map(renderPortRow));
   portCount.textContent = `${deviceCount} ${deviceCount === 1 ? "device" : "devices"}`;
 }
 
@@ -181,8 +196,15 @@ function renderHub() {
   modelValue.textContent = hub?.model?.name || "-";
   firmwareValue.textContent = hub?.firmwareVersion || "-";
   profileValue.textContent = hub?.profileVersion || "-";
+  batteryValue.textContent = hub?.batteryText || (Number.isFinite(hub?.batteryLevel) ? `${hub.batteryLevel}%` : "-");
   writeSizeValue.textContent = state.capabilities?.maxWriteSize ? `${state.capabilities.maxWriteSize} bytes` : "-";
   hubScreenText.textContent = state.connected ? "PB" : "--";
+  hubThumbPlaceholder.hidden = Boolean(hub);
+  hubThumbImage.hidden = !hub;
+  if (hub) {
+    hubThumbImage.src = hubImageSrc(hub);
+  }
+  hubThumbImage.alt = "";
   renderPorts();
 }
 
@@ -206,7 +228,7 @@ async function refreshPorts() {
     state.ports = mergePorts(ports);
     scanStamp.textContent = `Scanned ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
     setConnectionState("Connected", "ready");
-    renderPorts();
+    renderHub();
   } catch (error) {
     setConnectionState("Connected", "ready");
     setMessage(error.message || String(error), true);

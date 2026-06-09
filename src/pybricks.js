@@ -16,6 +16,8 @@ const DEVICE_INFORMATION_SERVICE_UUID = "0000180a-0000-1000-8000-00805f9b34fb";
 const FIRMWARE_REVISION_UUID = "00002a26-0000-1000-8000-00805f9b34fb";
 const SOFTWARE_REVISION_UUID = "00002a28-0000-1000-8000-00805f9b34fb";
 const PNP_ID_UUID = "00002a50-0000-1000-8000-00805f9b34fb";
+const BATTERY_SERVICE_UUID = "0000180f-0000-1000-8000-00805f9b34fb";
+const BATTERY_LEVEL_UUID = "00002a19-0000-1000-8000-00805f9b34fb";
 
 const COMMAND = Object.freeze({
   STOP_USER_PROGRAM: 0,
@@ -37,8 +39,26 @@ const STATUS = Object.freeze({
   USER_PROGRAM_RUNNING: 1 << 6
 });
 
-const SAFE_WRITE_STDIN_PAYLOAD_SIZE = 19;
+const SAFE_STDIN_WRITE = Object.freeze({
+  chunkSize: 8,
+  chunkDelay: 80,
+  allowPartialOnTimeout: true
+});
+
+const ADAPTIVE_SCAN_WRITE = Object.freeze({
+  chunkSize: 64,
+  minChunkSize: 8,
+  chunkDelay: 10,
+  maxChunkDelay: 80,
+  adaptive: true,
+  allowPartialOnTimeout: false
+});
+
 const sleep = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
 
 function dataViewToBytes(view, start = 0) {
   return new Uint8Array(view.buffer.slice(view.byteOffset + start, view.byteOffset + view.byteLength));
@@ -48,10 +68,14 @@ function textFromDataView(view) {
   return new TextDecoder().decode(dataViewToBytes(view));
 }
 
+function formatBatteryVoltage(voltageMv) {
+  return Number.isFinite(voltageMv) ? `${(voltageMv / 1000).toFixed(2)} V` : null;
+}
+
 function makeNonce() {
-  const random = new Uint32Array(2);
+  const random = new Uint16Array(1);
   window.crypto.getRandomValues(random);
-  return `${random[0].toString(16)}${random[1].toString(16)}`;
+  return random[0].toString(36);
 }
 
 function commandName(command) {
@@ -61,36 +85,51 @@ function commandName(command) {
   );
 }
 
-function makePortScanProgram(nonce, ports) {
+function makeAdaptiveWritePlan(maxWriteSize) {
+  const maxPayloadSize = Math.max(1, (maxWriteSize || 20) - 1);
+  const floorChunkSize = Math.min(ADAPTIVE_SCAN_WRITE.minChunkSize, maxPayloadSize);
+  const upperChunkSize = clamp(Math.min(ADAPTIVE_SCAN_WRITE.chunkSize, maxPayloadSize), floorChunkSize, maxPayloadSize);
+  const minChunkSize = Math.min(ADAPTIVE_SCAN_WRITE.minChunkSize, upperChunkSize);
+  const ratioDelay = (chunkSize) => {
+    const span = Math.max(1, upperChunkSize - minChunkSize);
+    const ratio = (upperChunkSize - chunkSize) / span;
+    return Math.round(ADAPTIVE_SCAN_WRITE.chunkDelay + ratio * (ADAPTIVE_SCAN_WRITE.maxChunkDelay - ADAPTIVE_SCAN_WRITE.chunkDelay));
+  };
+  const sizes = [
+    upperChunkSize,
+    Math.round(upperChunkSize * 0.75),
+    Math.round(upperChunkSize * 0.5),
+    Math.round(upperChunkSize * 0.33),
+    minChunkSize
+  ];
+  const uniqueSizes = [...new Set(sizes.map((size) => clamp(size, minChunkSize, upperChunkSize)))].sort((a, b) => b - a);
+
+  return uniqueSizes.map((chunkSize, index) => ({
+    ...ADAPTIVE_SCAN_WRITE,
+    name: `adaptive ${chunkSize}b/${ratioDelay(chunkSize)}ms`,
+    chunkSize,
+    chunkDelay: ratioDelay(chunkSize),
+    allowPartialOnTimeout: index === uniqueSizes.length - 1
+  }));
+}
+
+function makePortScanProgram(nonce, ports, hubClass) {
   const portList = (ports.length ? ports : ["A", "B", "C", "D", "E", "F"]).map((port) => `"${port}"`).join(", ");
+  const batteryCode = hubClass
+    ? `from pybricks.hubs import ${hubClass} as H
+try:h=H();print("B:${nonce}:V:%s"%h.battery.voltage())
+except Exception as e:print("B:${nonce}:X:%s"%type(e).__name__)`
+    : `print("B:${nonce}:X:UnknownHub")`;
 
   return `
-from pybricks.iodevices import PUPDevice
-from pybricks.parameters import Port
-try:
-    from uerrno import ENODEV
-except ImportError:
-    ENODEV = 19
-
-print("PBHT_BEGIN:${nonce}")
-for name in (${portList},):
-    try:
-        port = getattr(Port, name)
-    except AttributeError:
-        continue
-    try:
-        device = PUPDevice(port)
-        info = device.info()
-        print("PBHT_PORT:${nonce}:%s:device:%s" % (name, info.get("id", "?")))
-    except OSError as ex:
-        code = ex.args[0] if ex.args else -1
-        if code == ENODEV:
-            print("PBHT_PORT:${nonce}:%s:empty:" % name)
-        else:
-            print("PBHT_PORT:${nonce}:%s:error:%s" % (name, code))
-    except Exception as ex:
-        print("PBHT_PORT:${nonce}:%s:error:%s" % (name, type(ex).__name__))
-print("PBHT_END:${nonce}")
+${batteryCode}
+from pybricks.iodevices import PUPDevice as D
+from pybricks.parameters import Port as P
+for n in (${portList},):
+    try:i=D(getattr(P,n)).info()["id"];print("P:${nonce}:%s:D:%s"%(n,i))
+    except OSError:print("P:${nonce}:%s:E:"%n)
+    except Exception as e:print("P:${nonce}:%s:X:%s"%(n,type(e).__name__))
+print("X:${nonce}")
 `.trim();
 }
 
@@ -110,6 +149,10 @@ export class PybricksHubClient extends EventTarget {
     this.stdout = "";
     this.statusFlags = 0;
     this.hasStatusReport = false;
+    this.statusReportCount = 0;
+    this.runningProgramId = 0;
+    this.selectedSlot = 0;
+    this.eventTrace = [];
     this.stdoutDecoder = new TextDecoder();
   }
 
@@ -124,7 +167,7 @@ export class PybricksHubClient extends EventTarget {
 
     this.device = await navigator.bluetooth.requestDevice({
       filters: [{ services: [PYBRICKS_SERVICE_UUID] }],
-      optionalServices: [DEVICE_INFORMATION_SERVICE_UUID]
+      optionalServices: [DEVICE_INFORMATION_SERVICE_UUID, BATTERY_SERVICE_UUID]
     });
 
     this.device.addEventListener("gattserverdisconnected", this.#handleDisconnected);
@@ -133,6 +176,15 @@ export class PybricksHubClient extends EventTarget {
     const pybricksService = await this.server.getPrimaryService(PYBRICKS_SERVICE_UUID);
     this.commandEventCharacteristic = await pybricksService.getCharacteristic(PYBRICKS_COMMAND_EVENT_UUID);
     this.commandEventCharacteristic.addEventListener("characteristicvaluechanged", this.#handleNotification);
+
+    // Matches Pybricks Code's reconnect workaround: Chromium can keep a stale
+    // notification state where descriptor writes are skipped and events never fire.
+    try {
+      await this.commandEventCharacteristic.stopNotifications();
+    } catch {
+      // It is fine if notifications were not active yet.
+    }
+
     await this.commandEventCharacteristic.startNotifications();
 
     try {
@@ -193,36 +245,133 @@ export class PybricksHubClient extends EventTarget {
       throw new Error("This hub does not report REPL support.");
     }
 
-    const nonce = makeNonce();
-    const code = makePortScanProgram(nonce, this.info?.model?.ports ?? ["A", "B", "C", "D", "E", "F"]);
-    const command = `\x05${code.replace(/\n/g, "\r\n")}\r\n\x04`;
+    const scanPorts = this.info?.model?.ports ?? ["A", "B", "C", "D", "E", "F"];
+    const writeModes = makeAdaptiveWritePlan(this.capabilities.maxWriteSize);
+    let lastScanError = null;
 
-    this.stdout = "";
-    this.stdoutDecoder = new TextDecoder();
-    await this.writeCommand(COMMAND.STOP_USER_PROGRAM, undefined, "stop current program");
-    await this.#waitForProgramRunning(false, 3000);
-    await this.#startRepl();
-    await this.#waitForProgramRunning(true, 5000);
-    await sleep(300);
-    this.stdout = "";
-    await this.writeStdin("\x03\r", "wake REPL");
-    await this.#waitForStdout((text) => text.includes(">>>") || text.includes("KeyboardInterrupt"), 3000);
-    this.stdout = "";
+    for (const mode of writeModes) {
+      const nonce = makeNonce();
+      const code = makePortScanProgram(nonce, scanPorts, this.info?.model?.hubClass);
+      const rawCommand = `${code}\x04`;
+      const pasteCommand = `\x05${code.replace(/\n/g, "\r\n")}\r\n\x04`;
 
-    const resultPromise = this.#waitForScan(nonce, 20000);
-    await this.writeStdin(command, "send scan code");
-    return resultPromise;
+      try {
+        await this.#startFreshRepl();
+      } catch (error) {
+        throw error;
+      }
+
+      this.stdout = "";
+      await this.writeStdin("\x03\r", "wake friendly REPL");
+      await this.#waitForStdout((text) => text.includes(">>>") || text.includes("KeyboardInterrupt"), 3000);
+      this.stdout = "";
+      await this.writeStdin(`print("R:${nonce}")\r`, "send friendly REPL probe");
+      const didFriendlyProbeStdout = await this.#waitForStdout((text) => text.includes(`R:${nonce}`), 5000);
+
+      if (didFriendlyProbeStdout) {
+        try {
+          return await this.#runScanCommand(
+            pasteCommand,
+            `send paste scan code (${mode.name})`,
+            nonce,
+            scanPorts,
+            mode
+          );
+        } catch (error) {
+          lastScanError = error;
+          if (mode === writeModes.at(-1)) {
+            throw error;
+          }
+        } finally {
+          await this.writeCommand(COMMAND.STOP_USER_PROGRAM, undefined, "stop REPL after scan").catch(() => {});
+        }
+
+        continue;
+      }
+
+      const friendlyProbeOutput = this.#stdoutPreview();
+      this.stdout = "";
+      await this.writeStdin("\x03\x03\x01", "enter raw REPL");
+      const didEnterRawRepl = await this.#waitForStdout((text) => text.includes("raw REPL"), 3000);
+      let rawProbeOutput = "";
+
+      if (didEnterRawRepl) {
+        const rawProbe = `print("R:${nonce}")\x04`;
+        this.stdout = "";
+        await this.writeStdin(rawProbe, "send raw REPL probe");
+        const didRawProbeStdout = await this.#waitForStdout((text) => text.includes(`R:${nonce}`), 5000);
+
+        if (didRawProbeStdout) {
+          try {
+            return await this.#runScanCommand(
+              rawCommand,
+              `send raw scan code (${mode.name})`,
+              nonce,
+              scanPorts,
+              mode
+            );
+          } catch (error) {
+            lastScanError = error;
+            if (mode === writeModes.at(-1)) {
+              throw error;
+            }
+          } finally {
+            await this.writeStdin("\x02", "exit raw REPL").catch(() => {});
+            await this.writeCommand(COMMAND.STOP_USER_PROGRAM, undefined, "stop REPL after scan").catch(() => {});
+          }
+
+          continue;
+        }
+
+        rawProbeOutput = this.#stdoutPreview();
+        await this.writeStdin("\x02", "exit raw REPL").catch(() => {});
+      }
+
+      await this.writeCommand(COMMAND.STOP_USER_PROGRAM, undefined, "stop REPL after probe failure").catch(() => {});
+      throw new Error(
+        `REPL probe did not return stdout. Friendly output: ${friendlyProbeOutput || "none"}. Raw output: ${
+          rawProbeOutput || "none"
+        }. Events: ${this.#eventTracePreview()}`
+      );
+    }
+
+    throw lastScanError || new Error("Port scan failed.");
   }
 
-  async writeStdin(text, context = "send stdin") {
+  async writeStdin(text, context = "send stdin", options = SAFE_STDIN_WRITE) {
     const bytes = new TextEncoder().encode(text);
+    const requestedChunkSize = options.chunkSize ?? SAFE_STDIN_WRITE.chunkSize;
+    const requestedDelay = options.chunkDelay ?? SAFE_STDIN_WRITE.chunkDelay;
+    const minChunkSize = options.minChunkSize ?? requestedChunkSize;
+    const maxChunkDelay = options.maxChunkDelay ?? requestedDelay;
     const maxPayloadSize = Math.max(
       1,
-      Math.min(SAFE_WRITE_STDIN_PAYLOAD_SIZE, this.capabilities.maxWriteSize - 1 || SAFE_WRITE_STDIN_PAYLOAD_SIZE)
+      Math.min(requestedChunkSize, this.capabilities.maxWriteSize - 1 || requestedChunkSize)
     );
+    let chunkSize = maxPayloadSize;
+    let chunkDelay = requestedDelay;
+    let offset = 0;
 
-    for (let offset = 0; offset < bytes.length; offset += maxPayloadSize) {
-      await this.writeCommand(COMMAND.WRITE_STDIN, bytes.slice(offset, offset + maxPayloadSize), context);
+    while (offset < bytes.length) {
+      const end = Math.min(offset + chunkSize, bytes.length);
+
+      try {
+        await this.writeCommand(COMMAND.WRITE_STDIN, bytes.slice(offset, end), `${context} (${end}/${bytes.length})`);
+        offset = end;
+      } catch (error) {
+        if (!options.adaptive || chunkSize <= minChunkSize) {
+          throw error;
+        }
+
+        chunkSize = Math.max(minChunkSize, Math.floor(chunkSize / 2));
+        chunkDelay = Math.min(maxChunkDelay, Math.max(chunkDelay + 15, Math.round(chunkDelay * 1.6)));
+        await sleep(chunkDelay);
+        continue;
+      }
+
+      if (chunkDelay > 0) {
+        await sleep(chunkDelay);
+      }
     }
   }
 
@@ -235,16 +384,29 @@ export class PybricksHubClient extends EventTarget {
     message[0] = command;
     message.set(payload, 1);
 
-    try {
-      if ("writeValueWithResponse" in this.commandEventCharacteristic) {
-        await this.commandEventCharacteristic.writeValueWithResponse(message);
-        return;
-      }
+    const maxAttempts = command === COMMAND.WRITE_STDIN ? 3 : 1;
+    let lastError = null;
 
-      await this.commandEventCharacteristic.writeValue(message);
-    } catch (error) {
-      throw new Error(`${context}: ${error.message || String(error)}`);
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        if ("writeValueWithResponse" in this.commandEventCharacteristic) {
+          await this.commandEventCharacteristic.writeValueWithResponse(message);
+          return;
+        }
+
+        await this.commandEventCharacteristic.writeValue(message);
+        return;
+      } catch (error) {
+        lastError = error;
+
+        if (attempt < maxAttempts) {
+          await sleep(180 * attempt);
+          continue;
+        }
+      }
     }
+
+    throw new Error(`${context}: ${lastError?.message || String(lastError)}`);
   }
 
   async #startRepl() {
@@ -262,26 +424,45 @@ export class PybricksHubClient extends EventTarget {
     await this.writeCommand(COMMAND.START_REPL, undefined, "start REPL");
   }
 
+  async #startFreshRepl() {
+    this.stdout = "";
+    this.stdoutDecoder = new TextDecoder();
+    await this.writeCommand(COMMAND.STOP_USER_PROGRAM, undefined, "stop current program");
+    await this.#waitForProgramRunning(false, 3000);
+    await this.#startRepl();
+
+    if (!(await this.#waitForReplRunning(5000))) {
+      throw new Error(`REPL did not start. ${this.#statusPreview()}`);
+    }
+  }
+
   async #readHubInfo() {
     const defaults = {
       name: this.device?.name || "Pybricks Hub",
       firmwareVersion: "-",
       profileVersion: "-",
+      batteryLevel: null,
+      batteryVoltageMv: null,
+      batteryText: null,
       pnpId: null
     };
 
     try {
       const service = await this.server.getPrimaryService(DEVICE_INFORMATION_SERVICE_UUID);
+      const batteryLevelPromise = this.#readBatteryLevel().catch(() => defaults.batteryLevel);
       const [firmwareVersion, profileVersion, pnpId] = await Promise.all([
         this.#readTextCharacteristic(service, FIRMWARE_REVISION_UUID).catch(() => defaults.firmwareVersion),
         this.#readTextCharacteristic(service, SOFTWARE_REVISION_UUID).catch(() => defaults.profileVersion),
         this.#readDataCharacteristic(service, PNP_ID_UUID).then(parsePnpId).catch(() => defaults.pnpId)
       ]);
+      const batteryLevel = await batteryLevelPromise;
 
       return {
         ...defaults,
         firmwareVersion,
         profileVersion,
+        batteryLevel,
+        batteryText: Number.isFinite(batteryLevel) ? `${batteryLevel}%` : null,
         pnpId,
         model: resolveHubModel(pnpId)
       };
@@ -303,10 +484,52 @@ export class PybricksHubClient extends EventTarget {
     return characteristic.readValue();
   }
 
-  #waitForScan(nonce, timeoutMs) {
+  async #readBatteryLevel() {
+    const service = await this.server.getPrimaryService(BATTERY_SERVICE_UUID);
+    const value = await this.#readDataCharacteristic(service, BATTERY_LEVEL_UUID);
+    const level = value.byteLength ? value.getUint8(0) : null;
+
+    return Number.isFinite(level) ? Math.max(0, Math.min(100, level)) : null;
+  }
+
+  async #runScanCommand(command, context, nonce, expectedPorts, writeOptions) {
+    this.stdout = "";
+    const controller = new AbortController();
+    const resultPromise = this.#waitForScan(nonce, 20000, expectedPorts, controller.signal, {
+      allowPartialOnTimeout: writeOptions.allowPartialOnTimeout !== false
+    });
+
+    try {
+      await this.writeStdin(command, context, writeOptions);
+      return await resultPromise;
+    } catch (error) {
+      controller.abort();
+      await resultPromise.catch(() => {});
+      throw error;
+    }
+  }
+
+  #waitForScan(nonce, timeoutMs, expectedPorts = [], signal = null, options = {}) {
+    const allowPartialOnTimeout = options.allowPartialOnTimeout ?? true;
+    const hasExpectedPorts = (ports) =>
+      expectedPorts.length > 0 && expectedPorts.every((port) => ports.some((result) => result.port === port));
+
     return new Promise((resolve, reject) => {
+      if (signal?.aborted) {
+        reject(new Error("Port scan cancelled."));
+        return;
+      }
+
       const timeoutId = window.setTimeout(() => {
         cleanup();
+        const partial = parseScanOutput(this.stdout, nonce);
+        this.#applyScanMetadata(partial);
+
+        if (partial.ports.length && allowPartialOnTimeout) {
+          resolve(partial.ports);
+          return;
+        }
+
         const output = this.#stdoutPreview();
         reject(
           new Error(
@@ -320,8 +543,13 @@ export class PybricksHubClient extends EventTarget {
       const onStdout = () => {
         const result = parseScanOutput(this.stdout, nonce);
 
-        if (result.complete) {
+        if (result.complete || hasExpectedPorts(result.ports)) {
           cleanup();
+          this.#applyScanMetadata(result);
+          if (!result.ports.length) {
+            reject(new Error(`Port scan completed without port rows. Last hub output: ${this.#stdoutPreview()}`));
+            return;
+          }
           resolve(result.ports);
         }
       };
@@ -329,10 +557,26 @@ export class PybricksHubClient extends EventTarget {
       const cleanup = () => {
         window.clearTimeout(timeoutId);
         this.removeEventListener("stdout", onStdout);
+        signal?.removeEventListener("abort", onAbort);
+      };
+
+      const onAbort = () => {
+        cleanup();
+        reject(new Error("Port scan cancelled."));
       };
 
       this.addEventListener("stdout", onStdout);
+      signal?.addEventListener("abort", onAbort, { once: true });
     });
+  }
+
+  #applyScanMetadata(result) {
+    if (!this.info || result.battery?.status !== "voltage") {
+      return;
+    }
+
+    this.info.batteryVoltageMv = result.battery.voltageMv;
+    this.info.batteryText = formatBatteryVoltage(result.battery.voltageMv);
   }
 
   #waitForStdout(predicate, timeoutMs) {
@@ -397,18 +641,56 @@ export class PybricksHubClient extends EventTarget {
     });
   }
 
+  #waitForReplRunning(timeoutMs) {
+    const protocol = parseSemver(this.info?.profileVersion);
+    const shouldReportBuiltinRepl = usesBuiltinRepl(protocol);
+    const isReplRunning = () =>
+      this.#isUserProgramRunning() && (!shouldReportBuiltinRepl || this.runningProgramId === BUILTIN_PROGRAM.REPL);
+
+    if (this.hasStatusReport && isReplRunning()) {
+      return Promise.resolve(true);
+    }
+
+    return new Promise((resolve) => {
+      const timeoutId = window.setTimeout(() => {
+        cleanup();
+        resolve(false);
+      }, timeoutMs);
+
+      const onStatus = () => {
+        if (isReplRunning()) {
+          cleanup();
+          resolve(true);
+        }
+      };
+
+      const cleanup = () => {
+        window.clearTimeout(timeoutId);
+        this.removeEventListener("status", onStatus);
+      };
+
+      this.addEventListener("status", onStatus);
+    });
+  }
+
   #handleNotification = (event) => {
     const view = event.target.value;
     const eventType = view.getUint8(0);
+    this.#recordEventTrace(view);
 
     if (eventType === EVENT.STATUS_REPORT && view.byteLength >= 5) {
       this.statusFlags = view.getUint32(1, true);
       this.hasStatusReport = true;
+      this.statusReportCount += 1;
+      this.runningProgramId = view.byteLength > 5 ? view.getUint8(5) : 0;
+      this.selectedSlot = view.byteLength > 6 ? view.getUint8(6) : 0;
       this.dispatchEvent(
         new CustomEvent("status", {
           detail: {
             flags: this.statusFlags,
-            userProgramRunning: Boolean(this.statusFlags & STATUS.USER_PROGRAM_RUNNING)
+            userProgramRunning: Boolean(this.statusFlags & STATUS.USER_PROGRAM_RUNNING),
+            runningProgramId: this.runningProgramId,
+            selectedSlot: this.selectedSlot
           }
         })
       );
@@ -444,5 +726,33 @@ export class PybricksHubClient extends EventTarget {
     this.stdoutDecoder = new TextDecoder();
     this.statusFlags = 0;
     this.hasStatusReport = false;
+    this.statusReportCount = 0;
+    this.runningProgramId = 0;
+    this.selectedSlot = 0;
+    this.eventTrace = [];
+  }
+
+  #statusPreview() {
+    if (!this.hasStatusReport) {
+      return "No status report received from notifications.";
+    }
+
+    return `Status reports: ${this.statusReportCount}, flags: 0x${this.statusFlags.toString(
+      16
+    )}, runningProgramId: ${this.runningProgramId}, selectedSlot: ${this.selectedSlot}.`;
+  }
+
+  #recordEventTrace(view) {
+    const bytes = dataViewToBytes(view, 0);
+    const hex = [...bytes.slice(0, 12)].map((byte) => byte.toString(16).padStart(2, "0")).join(" ");
+    this.eventTrace.push(`t=${view.getUint8(0)} len=${view.byteLength} [${hex}]`);
+
+    if (this.eventTrace.length > 12) {
+      this.eventTrace.shift();
+    }
+  }
+
+  #eventTracePreview() {
+    return this.eventTrace.length ? this.eventTrace.join(" | ") : "none";
   }
 }

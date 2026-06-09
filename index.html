@@ -8,46 +8,22 @@
   </head>
   <body>
     <div class="app-shell">
-      <header class="topbar">
-        <div class="title-block">
-          <h1>Pybricks Hub Tester</h1>
-          <div id="connectionState" class="state-pill state-pill--idle">Disconnected</div>
-        </div>
-        <div class="toolbar" aria-label="Hub actions">
-          <button id="connectBtn" class="button button--primary" type="button" title="Connect">
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M7 7h4a4 4 0 0 1 0 8H7" />
-              <path d="M17 7h-4a4 4 0 0 0 0 8h4" />
-              <path d="M8 12h8" />
-            </svg>
-            Connect
-          </button>
-          <button id="refreshBtn" class="button" type="button" title="Refresh ports" disabled>
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M20 6v6h-6" />
-              <path d="M4 18v-6h6" />
-              <path d="M19 12a7 7 0 0 0-12-5" />
-              <path d="M5 12a7 7 0 0 0 12 5" />
-            </svg>
-            Refresh
-          </button>
-          <button id="disconnectBtn" class="button" type="button" title="Disconnect" disabled>
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M7 7h3a4 4 0 0 1 0 8H7" />
-              <path d="M17 7h-3a4 4 0 0 0-1 .1" />
-              <path d="M16 15h1" />
-              <path d="M4 20 20 4" />
-            </svg>
-            Disconnect
-          </button>
-        </div>
-      </header>
-
-      <main class="workspace">
-        <section class="hub-section" aria-labelledby="hubTitle">
-          <div class="hub-header">
-            <div>
-              <h2 id="hubTitle">No hub selected</h2>
+      <section class="dashboard-panel" aria-labelledby="hubTitle">
+        <header class="dashboard-header">
+          <div class="hub-identity">
+            <div class="hub-thumb" aria-hidden="true">
+              <div id="hubThumbPlaceholder" class="hub-thumb__placeholder">
+                <div class="hub-thumb__body"></div>
+              </div>
+              <img id="hubThumbImage" class="hub-thumb__image" src="./assets/pybricks-hubs/hub-prime.png" alt="" hidden />
+            </div>
+            <div class="hub-summary">
+              <h1 id="hubTitle">No hub selected</h1>
+              <div class="hub-status-line">
+                <div id="connectionState" class="state-pill state-pill--idle">Disconnected</div>
+                <span id="scanStamp" class="scan-stamp">Not scanned</span>
+                <span id="portCount" class="port-count">0 devices</span>
+              </div>
               <dl class="hub-meta">
                 <div>
                   <dt>Model</dt>
@@ -62,36 +38,86 @@
                   <dd id="profileValue">-</dd>
                 </div>
                 <div>
+                  <dt>Battery</dt>
+                  <dd id="batteryValue">-</dd>
+                </div>
+                <div>
                   <dt>Write size</dt>
                   <dd id="writeSizeValue">-</dd>
                 </div>
               </dl>
             </div>
-            <div id="scanStamp" class="scan-stamp">Not scanned</div>
           </div>
 
-          <div class="hub-visual" aria-label="Hub port map">
-            <div class="port-rail port-rail--left" id="leftPorts"></div>
-            <div class="hub-body">
-              <div class="hub-screen">
-                <span id="hubScreenText">PB</span>
+          <div class="toolbar" aria-label="Hub actions">
+            <button id="connectBtn" class="button button--primary" type="button" title="Connect">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M7 7h4a4 4 0 0 1 0 8H7" />
+                <path d="M17 7h-4a4 4 0 0 0 0 8h4" />
+                <path d="M8 12h8" />
+              </svg>
+              Connect
+            </button>
+            <button id="refreshBtn" class="button" type="button" title="Refresh ports" disabled>
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M20 6v6h-6" />
+                <path d="M4 18v-6h6" />
+                <path d="M19 12a7 7 0 0 0-12-5" />
+                <path d="M5 12a7 7 0 0 0 12 5" />
+              </svg>
+              Refresh
+            </button>
+            <button id="disconnectBtn" class="button button--danger" type="button" title="Disconnect" disabled>
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M18 6 6 18" />
+                <path d="m6 6 12 12" />
+              </svg>
+              Disconnect
+            </button>
+          </div>
+        </header>
+
+        <nav class="dashboard-tabs" aria-label="Hub views">
+          <button class="tab tab--active" type="button">Dashboard</button>
+        </nav>
+
+        <main class="dashboard-stage">
+          <div class="hub-dashboard" id="hubDashboard" aria-label="Hub port map">
+            <div class="port-column port-column--left" id="leftPorts"></div>
+            <div class="hub-canvas">
+              <div class="hub-body" aria-hidden="true">
+                <div class="hub-slot hub-slot--top"></div>
+                <div class="hub-slot hub-slot--bottom"></div>
+                <div class="hub-screw hub-screw--tl"></div>
+                <div class="hub-screw hub-screw--tr"></div>
+                <div class="hub-screw hub-screw--bl"></div>
+                <div class="hub-screw hub-screw--br"></div>
+                <div class="hub-brand">Pybricks</div>
+                <div class="hub-screen">
+                  <span id="hubScreenText">PB</span>
+                </div>
+                <div class="hub-grid">
+                  <span></span><span></span><span></span>
+                  <span></span><span></span><span></span>
+                  <span></span><span></span><span></span>
+                  <span></span><span></span><span></span>
+                </div>
+                <div class="hub-button"></div>
+                <div class="hub-paddle hub-paddle--left"></div>
+                <div class="hub-paddle hub-paddle--right"></div>
+                <span class="hub-port-label hub-port-label--a" data-hub-port="A">A</span>
+                <span class="hub-port-label hub-port-label--b" data-hub-port="B">B</span>
+                <span class="hub-port-label hub-port-label--c" data-hub-port="C">C</span>
+                <span class="hub-port-label hub-port-label--d" data-hub-port="D">D</span>
+                <span class="hub-port-label hub-port-label--e" data-hub-port="E">E</span>
+                <span class="hub-port-label hub-port-label--f" data-hub-port="F">F</span>
               </div>
-              <div class="hub-button" aria-hidden="true"></div>
-              <div class="hub-brand">Pybricks</div>
             </div>
-            <div class="port-rail port-rail--right" id="rightPorts"></div>
+            <div class="port-column port-column--right" id="rightPorts"></div>
           </div>
-        </section>
-
-        <aside class="side-panel" aria-labelledby="portsTitle">
-          <div class="panel-header">
-            <h2 id="portsTitle">Ports</h2>
-            <span id="portCount" class="port-count">0 devices</span>
-          </div>
-          <div id="portList" class="port-list"></div>
           <div id="messageBox" class="message-box" role="status" aria-live="polite"></div>
-        </aside>
-      </main>
+        </main>
+      </section>
     </div>
 
     <script type="module" src="./src/main.js"></script>
