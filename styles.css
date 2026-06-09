@@ -448,6 +448,16 @@ h1 {
   color: var(--muted);
 }
 
+.port-tile[data-switchable="true"] {
+  cursor: pointer;
+}
+
+.port-tile[data-switchable="true"]:focus-visible {
+  outline: 3px solid rgb(45 131 183 / 28%);
+  outline-offset: 6px;
+  border-radius: 8px;
+}
+
 .port-column .port-tile {
   position: absolute;
   top: var(--port-row-y);
@@ -513,12 +523,47 @@ h1 {
 }
 
 .device-icon__core {
+  position: relative;
   display: block;
   width: 10px;
   height: 10px;
   border-radius: 50%;
   background: var(--icon-color);
   box-shadow: 0 -16px 0 var(--icon-color), 16px 0 0 var(--icon-color), 0 16px 0 var(--icon-color), -16px 0 0 var(--icon-color);
+}
+
+.device-icon--sensor {
+  border-radius: 12px;
+}
+
+.device-icon--sensor .device-icon__core {
+  width: 28px;
+  height: 28px;
+  border: 3px solid var(--icon-color);
+  background: transparent;
+  box-shadow: none;
+}
+
+.device-icon--sensor .device-icon__core::before {
+  position: absolute;
+  inset: 7px;
+  border-radius: 50%;
+  background: var(--icon-color);
+  content: "";
+}
+
+.device-icon--empty {
+  border-style: dashed;
+  border-radius: 12px;
+}
+
+.device-icon--empty .device-icon__core {
+  width: 26px;
+  height: 14px;
+  border: 3px solid var(--icon-color);
+  border-radius: 999px;
+  background: transparent;
+  box-shadow: none;
 }
 
 .port-tile--device .device-icon {
@@ -559,6 +604,26 @@ h1 {
   font-size: 13px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.port-detail--live {
+  color: var(--blue);
+  font-size: 18px;
+  font-weight: 650;
+  line-height: 1.12;
+}
+
+.port-detail--switchable::after {
+  display: inline-block;
+  width: 0;
+  height: 0;
+  margin-left: 7px;
+  transform: translateY(-1px);
+  border-top: 5px solid currentColor;
+  border-right: 4px solid transparent;
+  border-left: 4px solid transparent;
+  content: "";
+  opacity: 0.72;
 }
 
 .port-tile--device .port-device,

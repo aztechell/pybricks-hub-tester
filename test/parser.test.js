@@ -4,6 +4,7 @@ import {
   deviceNameForId,
   makeInitialPorts,
   parseHubCapabilities,
+  parseLiveOutput,
   parsePnpId,
   parseScanOutput,
   parseSemver,
@@ -152,6 +153,72 @@ describe("parser", () => {
     assert.deepEqual(makeInitialPorts("unavailable", resolveHubModel({ productId: 65 }).ports), [
       { port: "A", status: "unavailable" },
       { port: "B", status: "unavailable" }
+    ]);
+  });
+
+  it("parses live monitor values for a nonce", () => {
+    const output = [
+      "L:live1:B:angle:350",
+      "L:other:A:angle:999",
+      "L:live1:A:force:0.5",
+      "L:live1:B:speed:12"
+    ].join("\n");
+
+    assert.deepEqual(parseLiveOutput(output, "live1").values, [
+      {
+        port: "A",
+        mode: "force",
+        status: "value",
+        value: "0.5",
+        error: null
+      },
+      {
+        port: "B",
+        mode: "angle",
+        status: "value",
+        value: "350",
+        error: null
+      },
+      {
+        port: "B",
+        mode: "speed",
+        status: "value",
+        value: "12",
+        error: null
+      }
+    ]);
+  });
+
+  it("keeps the latest live value per port and mode", () => {
+    const output = ["L:n:A:angle:100", "L:n:A:speed:4", "L:n:A:angle:105"].join("\n");
+
+    assert.deepEqual(parseLiveOutput(output, "n").values, [
+      {
+        port: "A",
+        mode: "angle",
+        status: "value",
+        value: "105",
+        error: null
+      },
+      {
+        port: "A",
+        mode: "speed",
+        status: "value",
+        value: "4",
+        error: null
+      }
+    ]);
+  });
+
+  it("parses live monitor errors", () => {
+    assert.deepEqual(parseLiveOutput("L:n:D:error:OSError", "n").values, [
+      {
+        port: "D",
+        mode: "error",
+        status: "error",
+        value: "OSError",
+        error: "OSError"
+      }
     ]);
   });
 });

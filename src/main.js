@@ -1,5 +1,5 @@
 import { PybricksHubClient } from "./pybricks.js";
-import { makeInitialPorts, PORT_NAMES } from "./parser.js";
+import { liveModesForDeviceId, makeInitialPorts, PORT_NAMES } from "./parser.js";
 
 const connectBtn = document.querySelector("#connectBtn");
 const refreshBtn = document.querySelector("#refreshBtn");
@@ -33,12 +33,16 @@ const HUB_IMAGE_BY_PRODUCT_ID = Object.freeze({
   131: "hub-essential.png"
 });
 
+const SENSOR_DEVICE_IDS = new Set([8, 34, 35, 37, 61, 62, 63, 64]);
+
 const state = {
   connected: false,
   busy: false,
   hub: null,
   capabilities: null,
   ports: makeInitialPorts(),
+  liveValues: new Map(),
+  selectedModeByPort: new Map(),
   message: "",
   error: ""
 };
@@ -121,8 +125,112 @@ function describePort(port) {
   };
 }
 
+function liveValueKey(port, mode) {
+  return `${port}:${mode}`;
+}
+
+function liveModesForPort(port) {
+  if (port.status !== "device" && port.status !== "unknown") {
+    return [];
+  }
+
+  return liveModesForDeviceId(port.deviceId);
+}
+
+function selectedLiveMode(port) {
+  const modes = liveModesForPort(port);
+  const selected = state.selectedModeByPort.get(port.port);
+
+  return modes.includes(selected) ? selected : modes[0];
+}
+
+function formatLiveValue(reading) {
+  const value = String(reading.value ?? "").trim();
+
+  if (reading.status === "error") {
+    return `Error: ${value || "Read failed"}`;
+  }
+
+  if (reading.mode === "angle") {
+    return `${value}\u00b0`;
+  }
+
+  if (reading.mode === "speed") {
+    return `${value}\u00b0/s`;
+  }
+
+  if (reading.mode === "force") {
+    return `${value} N`;
+  }
+
+  if (reading.mode === "distance") {
+    return `${value} cm`;
+  }
+
+  if (reading.mode === "reflection") {
+    return `${value}%`;
+  }
+
+  return value || "...";
+}
+
+function liveDisplayForPort(port, description) {
+  const modes = liveModesForPort(port);
+
+  if (!modes.length) {
+    return {
+      text: port.deviceId ? `ID ${port.deviceId}` : description.detail,
+      live: false,
+      switchable: false,
+      mode: null
+    };
+  }
+
+  const mode = selectedLiveMode(port);
+  const reading = state.liveValues.get(liveValueKey(port.port, mode));
+  const error = state.liveValues.get(liveValueKey(port.port, "error"));
+
+  if (reading) {
+    return {
+      text: formatLiveValue(reading),
+      live: true,
+      switchable: modes.length > 1,
+      mode
+    };
+  }
+
+  if (error) {
+    return {
+      text: formatLiveValue(error),
+      live: false,
+      switchable: modes.length > 1,
+      mode: "error"
+    };
+  }
+
+  return {
+    text: "...",
+    live: true,
+    switchable: modes.length > 1,
+    mode
+  };
+}
+
+function iconClass(port) {
+  if (port.status === "empty" || port.status === "unavailable") {
+    return "device-icon device-icon--empty";
+  }
+
+  if ((port.status === "device" || port.status === "unknown") && SENSOR_DEVICE_IDS.has(port.deviceId)) {
+    return "device-icon device-icon--sensor";
+  }
+
+  return "device-icon device-icon--motor";
+}
+
 function renderPortTile(port, rowIndex = 0) {
   const description = describePort(port);
+  const liveDisplay = liveDisplayForPort(port, description);
   const element = document.createElement("div");
   const icon = document.createElement("div");
   const iconCore = document.createElement("span");
@@ -131,16 +239,27 @@ function renderPortTile(port, rowIndex = 0) {
   const detail = document.createElement("div");
 
   element.className = `${portClass(port)} port-tile--row-${rowIndex + 1}`;
-  element.title = `${description.label}. ${description.detail}`;
-  icon.className = "device-icon";
+  element.title = `${description.label}. ${description.detail}${liveDisplay.mode ? `. ${liveDisplay.mode}` : ""}`;
+  element.dataset.port = port.port;
+  element.dataset.switchable = liveDisplay.switchable ? "true" : "false";
+  if (liveDisplay.switchable) {
+    element.tabIndex = 0;
+    element.setAttribute("role", "button");
+    element.setAttribute("aria-label", `${description.label}, ${liveDisplay.text}. Switch mode.`);
+  }
+  icon.className = iconClass(port);
   icon.setAttribute("aria-hidden", "true");
   iconCore.className = "device-icon__core";
   icon.append(iconCore);
   content.className = "port-content";
   device.className = "port-device";
   device.textContent = description.label;
-  detail.className = "port-detail";
-  detail.textContent = description.detail;
+  detail.className = [
+    "port-detail",
+    liveDisplay.live ? "port-detail--live" : "",
+    liveDisplay.switchable ? "port-detail--switchable" : ""
+  ].filter(Boolean).join(" ");
+  detail.textContent = liveDisplay.text;
   content.append(device, detail);
   element.append(icon, content);
   return element;
@@ -161,6 +280,52 @@ function currentHubModel() {
 
 function currentPortNames() {
   return currentHubModel().ports;
+}
+
+function syncLiveModesForPorts() {
+  const activePorts = new Set(state.ports.map((port) => port.port));
+
+  for (const port of state.ports) {
+    const modes = liveModesForPort(port);
+    const selected = state.selectedModeByPort.get(port.port);
+
+    if (!modes.length) {
+      state.selectedModeByPort.delete(port.port);
+      continue;
+    }
+
+    if (!modes.includes(selected)) {
+      state.selectedModeByPort.set(port.port, modes[0]);
+    }
+  }
+
+  for (const port of [...state.selectedModeByPort.keys()]) {
+    if (!activePorts.has(port)) {
+      state.selectedModeByPort.delete(port);
+    }
+  }
+
+  for (const key of [...state.liveValues.keys()]) {
+    const [port] = key.split(":");
+
+    if (!activePorts.has(port)) {
+      state.liveValues.delete(key);
+    }
+  }
+}
+
+function cyclePortMode(portName) {
+  const port = state.ports.find((item) => item.port === portName);
+  const modes = port ? liveModesForPort(port) : [];
+
+  if (modes.length < 2) {
+    return;
+  }
+
+  const current = selectedLiveMode(port);
+  const next = modes[(modes.indexOf(current) + 1) % modes.length];
+  state.selectedModeByPort.set(portName, next);
+  renderHub();
 }
 
 function hubImageSrc(hub) {
@@ -213,6 +378,8 @@ function resetUiAfterDisconnect() {
   state.hub = null;
   state.capabilities = null;
   state.ports = makeInitialPorts("unavailable");
+  state.liveValues.clear();
+  state.selectedModeByPort.clear();
   scanStamp.textContent = "Not scanned";
   setConnectionState("Disconnected", "idle");
   setBusy(false);
@@ -222,13 +389,17 @@ function resetUiAfterDisconnect() {
 async function refreshPorts() {
   setBusy(true, "Scanning");
   setMessage("");
+  state.liveValues.clear();
 
   try {
+    await client.stopLiveMonitor();
     const ports = await client.scanPorts();
     state.ports = mergePorts(ports);
+    syncLiveModesForPorts();
     scanStamp.textContent = `Scanned ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
     setConnectionState("Connected", "ready");
     renderHub();
+    await client.startLiveMonitor(state.ports);
   } catch (error) {
     setConnectionState("Connected", "ready");
     setMessage(error.message || String(error), true);
@@ -247,6 +418,8 @@ connectBtn.addEventListener("click", async () => {
     state.hub = info;
     state.capabilities = capabilities;
     state.ports = makeInitialPorts("unavailable", currentPortNames());
+    state.liveValues.clear();
+    syncLiveModesForPorts();
     setConnectionState("Connected", "ready");
     renderHub();
     await refreshPorts();
@@ -266,6 +439,43 @@ disconnectBtn.addEventListener("click", async () => {
   setBusy(true, "Disconnecting");
   await client.disconnect();
   resetUiAfterDisconnect();
+});
+
+hubDashboard.addEventListener("click", (event) => {
+  const tile = event.target.closest(".port-tile[data-switchable='true']");
+
+  if (!tile) {
+    return;
+  }
+
+  cyclePortMode(tile.dataset.port);
+});
+
+hubDashboard.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" && event.key !== " ") {
+    return;
+  }
+
+  const tile = event.target.closest(".port-tile[data-switchable='true']");
+
+  if (!tile) {
+    return;
+  }
+
+  event.preventDefault();
+  cyclePortMode(tile.dataset.port);
+});
+
+client.addEventListener("live", (event) => {
+  for (const reading of event.detail.values) {
+    if (reading.status === "value") {
+      state.liveValues.delete(liveValueKey(reading.port, "error"));
+    }
+
+    state.liveValues.set(liveValueKey(reading.port, reading.mode), reading);
+  }
+
+  renderHub();
 });
 
 client.addEventListener("disconnected", () => {

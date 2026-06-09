@@ -67,6 +67,59 @@ export const DEVICE_NAMES = Object.freeze({
   76: "Technic Large Angular Motor"
 });
 
+export const LIVE_DEVICE_PROFILES = Object.freeze({
+  37: {
+    kind: "color-distance",
+    modes: ["reflection", "color"]
+  },
+  38: {
+    kind: "motor",
+    modes: ["angle", "speed"]
+  },
+  46: {
+    kind: "motor",
+    modes: ["angle", "speed"]
+  },
+  47: {
+    kind: "motor",
+    modes: ["angle", "speed"]
+  },
+  48: {
+    kind: "motor",
+    modes: ["angle", "speed"]
+  },
+  49: {
+    kind: "motor",
+    modes: ["angle", "speed"]
+  },
+  61: {
+    kind: "color",
+    modes: ["reflection", "color"]
+  },
+  62: {
+    kind: "ultrasonic",
+    modes: ["distance"]
+  },
+  63: {
+    kind: "force",
+    modes: ["force", "pressed"]
+  },
+  65: {
+    kind: "motor",
+    modes: ["angle", "speed"]
+  },
+  75: {
+    kind: "motor",
+    modes: ["angle", "speed"]
+  },
+  76: {
+    kind: "motor",
+    modes: ["angle", "speed"]
+  }
+});
+
+const LIVE_MODE_ORDER = Object.freeze(["angle", "speed", "force", "pressed", "distance", "reflection", "color", "error"]);
+
 export const HUB_CAPABILITY = Object.freeze({
   HAS_REPL: 1 << 0,
   HAS_PORT_VIEW: 1 << 3
@@ -74,6 +127,10 @@ export const HUB_CAPABILITY = Object.freeze({
 
 export function deviceNameForId(deviceId) {
   return DEVICE_NAMES[deviceId] ?? `Unknown #${deviceId}`;
+}
+
+export function liveModesForDeviceId(deviceId) {
+  return LIVE_DEVICE_PROFILES[deviceId]?.modes ?? [];
 }
 
 export function parseSemver(value) {
@@ -299,5 +356,48 @@ export function parseScanOutput(text, nonce) {
     complete,
     battery,
     ports: [...byPort.values()].sort((a, b) => PORT_NAMES.indexOf(a.port) - PORT_NAMES.indexOf(b.port))
+  };
+}
+
+export function parseLiveOutput(text, nonce) {
+  const byKey = new Map();
+
+  for (const rawLine of String(text).split(/[\r\n]+/)) {
+    const line = rawLine.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "").trim();
+    const parts = line.split(":");
+
+    if (parts.length < 5 || parts[0] !== "L" || parts[1] !== nonce) {
+      continue;
+    }
+
+    const [, , port, mode, ...rest] = parts;
+    const value = rest.join(":");
+
+    if (!PORT_NAMES.includes(port) || !mode) {
+      continue;
+    }
+
+    byKey.set(`${port}:${mode}`, {
+      port,
+      mode,
+      status: mode === "error" ? "error" : "value",
+      value,
+      error: mode === "error" ? value || "Error" : null
+    });
+  }
+
+  return {
+    values: [...byKey.values()].sort((a, b) => {
+      const portDelta = PORT_NAMES.indexOf(a.port) - PORT_NAMES.indexOf(b.port);
+
+      if (portDelta) {
+        return portDelta;
+      }
+
+      const aMode = LIVE_MODE_ORDER.includes(a.mode) ? LIVE_MODE_ORDER.indexOf(a.mode) : LIVE_MODE_ORDER.length;
+      const bMode = LIVE_MODE_ORDER.includes(b.mode) ? LIVE_MODE_ORDER.indexOf(b.mode) : LIVE_MODE_ORDER.length;
+
+      return aMode - bMode;
+    })
   };
 }

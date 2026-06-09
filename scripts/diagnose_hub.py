@@ -41,12 +41,14 @@ COMMAND_START_USER_PROGRAM = 1
 COMMAND_START_REPL = 2
 COMMAND_WRITE_STDIN = 6
 BUILTIN_REPL = 0x80
+BUILTIN_PORT_VIEW = 0x81
 
 EVENT_STATUS_REPORT = 0
 EVENT_WRITE_STDOUT = 1
 EVENT_WRITE_APP_DATA = 2
 
 STATUS_USER_PROGRAM_RUNNING = 1 << 6
+HUB_CAPABILITY_HAS_PORT_VIEW = 1 << 3
 
 HUB_MODELS = {
     64: "BOOST Move Hub",
@@ -147,6 +149,8 @@ class PybricksDiagnostic:
                     self.info = await self.read_hub_info(name)
                     self.print_hub_info(self.info)
                     await self.subscribe_notifications()
+                    if self.args.port_view:
+                        return await self.run_port_view_diagnostics()
                     return await self.run_repl_diagnostics()
             except DiagnosticError:
                 raise
@@ -385,6 +389,104 @@ class PybricksDiagnostic:
             f"No WRITE_STDOUT event after friendly or raw probe. {self.status_summary()}",
         )
 
+    async def run_port_view_diagnostics(self) -> str:
+        if not self.profile_at_least(self.info.profile or "0.0.0", "1.4.0"):
+            raise DiagnosticError(
+                "portview_unsupported",
+                f"Pybricks profile {self.info.profile!r} does not support builtin PortView.",
+            )
+
+        flags = int(self.info.capabilities.get("flags", 0)) if self.info else 0
+        if not flags & HUB_CAPABILITY_HAS_PORT_VIEW:
+            raise DiagnosticError(
+                "portview_unsupported",
+                f"Hub capabilities do not report HAS_PORT_VIEW. capabilities={self.info.capabilities if self.info else None}",
+            )
+
+        self.clear_stdout()
+        self.app_data_events.clear()
+
+        try:
+            await self.write_command(COMMAND_STOP_USER_PROGRAM, context="STOP_USER_PROGRAM before PortView")
+            await self.wait_for(lambda: not self.user_program_running(), 3)
+
+            await self.write_command(
+                COMMAND_START_USER_PROGRAM,
+                bytes([BUILTIN_PORT_VIEW]),
+                context="START_USER_PROGRAM PortView",
+            )
+
+            did_start = await self.wait_for(
+                lambda: self.user_program_running() and self.running_program_id == BUILTIN_PORT_VIEW,
+                self.args.timeout,
+            )
+            if not did_start:
+                if "Port View Placeholder" in self.stdout_text:
+                    self.log.log(
+                        "result",
+                        "portview_placeholder",
+                        stdout=self.stdout_preview(),
+                        status=self.status_summary(),
+                    )
+                    return "portview_placeholder"
+                raise DiagnosticError("portview_unsupported", f"PortView did not start. {self.status_summary()}")
+
+            self.log.log(
+                "stage",
+                "PortView status reached runningProgramId=129",
+                status=self.status_summary(),
+            )
+            await self.collect_port_view_events()
+
+            if self.app_data_events:
+                self.log.log(
+                    "result",
+                    "portview_appdata_seen",
+                    appdata_count=len(self.app_data_events),
+                    first_appdata_hex=self.app_data_events[0].hex(" "),
+                    status=self.status_summary(),
+                )
+                return "portview_appdata_seen"
+
+            if "Port View Placeholder" in self.stdout_text:
+                self.log.log(
+                    "result",
+                    "portview_placeholder",
+                    stdout=self.stdout_preview(),
+                    status=self.status_summary(),
+                )
+                return "portview_placeholder"
+
+            self.log.log(
+                "result",
+                "portview_no_appdata",
+                stdout=self.stdout_preview() or "none",
+                status=self.status_summary(),
+            )
+            return "portview_no_appdata"
+        finally:
+            try:
+                await self.write_command(COMMAND_STOP_USER_PROGRAM, context="STOP_USER_PROGRAM after PortView")
+                await self.wait_for(lambda: not self.user_program_running(), 3)
+            except Exception as exc:
+                self.log.log("error", "failed to stop PortView", error=str(exc), status=self.status_summary())
+
+    async def collect_port_view_events(self) -> None:
+        deadline = time.monotonic() + self.args.timeout
+        last_count = -1
+
+        while time.monotonic() < deadline:
+            if len(self.app_data_events) != last_count:
+                last_count = len(self.app_data_events)
+                self.log.log(
+                    "stage",
+                    "collecting PortView events",
+                    appdata_count=len(self.app_data_events),
+                    stdout=self.stdout_preview() or "none",
+                )
+
+            await asyncio.sleep(0.05)
+
     async def start_repl(self) -> None:
         profile = self.info.profile if self.info else None
         if profile and self.profile_at_least(profile, "1.4.0"):
@@ -574,6 +676,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--chunk-delay", type=int, default=80, help="Delay between stdin chunks in milliseconds.")
     parser.add_argument("--connect-timeout", type=float, default=8, help="Timeout for each BLE connection attempt.")
     parser.add_argument("--retries", type=int, default=3, help="Retries for each GATT write.")
+    parser.add_argument(
+        "--port-view",
+        action="store_true",
+        help="Start builtin PortView (0x81) and collect status/stdout/appdata notifications.",
+    )
     parser.add_argument(
         "--probe-candidates",
         action="store_true",

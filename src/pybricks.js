@@ -1,6 +1,8 @@
 import {
   HUB_CAPABILITY,
+  liveModesForDeviceId,
   parseHubCapabilities,
+  parseLiveOutput,
   parsePnpId,
   parseScanOutput,
   parseSemver,
@@ -52,6 +54,26 @@ const ADAPTIVE_SCAN_WRITE = Object.freeze({
   maxChunkDelay: 80,
   adaptive: true,
   allowPartialOnTimeout: false
+});
+
+const LIVE_MONITOR_WRITE = Object.freeze({
+  chunkSize: 64,
+  minChunkSize: 8,
+  chunkDelay: 10,
+  maxChunkDelay: 80,
+  adaptive: true,
+  allowPartialOnTimeout: false
+});
+
+const LIVE_MONITOR_INTERVAL_MS = 350;
+
+const MOTOR_DEVICE_IDS = Object.freeze([38, 46, 47, 48, 49, 65, 75, 76]);
+
+const LIVE_DEVICE_CLASS_BY_ID = Object.freeze({
+  37: "ColorDistanceSensor",
+  61: "ColorSensor",
+  62: "UltrasonicSensor",
+  63: "ForceSensor"
 });
 
 const sleep = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
@@ -133,6 +155,84 @@ print("X:${nonce}")
 `.trim();
 }
 
+function makePythonTuple(items) {
+  if (items.length === 1) {
+    return `(${items[0]},)`;
+  }
+
+  return `(${items.join(",")})`;
+}
+
+function makeLiveMonitorProgram(nonce, ports) {
+  const livePorts = ports.filter((port) => liveModesForDeviceId(port.deviceId).length);
+
+  if (!livePorts.length) {
+    return null;
+  }
+
+  const portRows = makePythonTuple(livePorts.map((port) => `("${port.port}",${port.deviceId})`));
+  const motorIds = makePythonTuple(MOTOR_DEVICE_IDS.map(String));
+  const importNames = new Set();
+
+  for (const port of livePorts) {
+    if (MOTOR_DEVICE_IDS.includes(port.deviceId)) {
+      importNames.add("Motor");
+      continue;
+    }
+
+    const className = LIVE_DEVICE_CLASS_BY_ID[port.deviceId];
+
+    if (className) {
+      importNames.add(className);
+    }
+  }
+
+  return `
+N="${nonce}"
+R=${portRows}
+M=${motorIds}
+def emit(p,m,v):
+    print("L:%s:%s:%s:%s"%(N,p,m,v))
+try:
+    from pybricks.parameters import Port
+    from pybricks.pupdevices import ${[...importNames].join(",")}
+    from pybricks.tools import wait
+except Exception as e:
+    for n,i in R:
+        emit(n,"error",type(e).__name__)
+    raise
+def make(i,p):
+    if i in M:return Motor(p,reset_angle=False)
+    if i==63:return ForceSensor(p)
+    if i==62:return UltrasonicSensor(p)
+    if i==61:return ColorSensor(p)
+    if i==37:return ColorDistanceSensor(p)
+    return None
+D=[]
+for n,i in R:
+    try:
+        d=make(i,getattr(Port,n))
+        if d:D.append((n,i,d))
+    except Exception as e:
+        emit(n,"error",type(e).__name__)
+print("LM:%s:S"%N)
+while True:
+    for n,i,d in D:
+        try:
+            if i in M:
+                emit(n,"angle",d.angle());emit(n,"speed",d.speed())
+            elif i==63:
+                emit(n,"force","%.1f"%d.force());emit(n,"pressed",1 if d.pressed() else 0)
+            elif i==62:
+                emit(n,"distance",d.distance()//10)
+            elif i in (37,61):
+                emit(n,"reflection",d.reflection());emit(n,"color",str(d.color()).split(".")[-1])
+        except Exception as e:
+            emit(n,"error",type(e).__name__)
+    wait(${LIVE_MONITOR_INTERVAL_MS})
+`.trim();
+}
+
 export class PybricksHubClient extends EventTarget {
   constructor() {
     super();
@@ -154,6 +254,9 @@ export class PybricksHubClient extends EventTarget {
     this.selectedSlot = 0;
     this.eventTrace = [];
     this.stdoutDecoder = new TextDecoder();
+    this.liveNonce = null;
+    this.liveBuffer = "";
+    this.liveRunning = false;
   }
 
   get connected() {
@@ -217,6 +320,8 @@ export class PybricksHubClient extends EventTarget {
   }
 
   async disconnect() {
+    await this.stopLiveMonitor().catch(() => {});
+
     if (this.commandEventCharacteristic) {
       try {
         await this.commandEventCharacteristic.stopNotifications();
@@ -232,9 +337,83 @@ export class PybricksHubClient extends EventTarget {
     this.#resetConnection();
   }
 
+  async startLiveMonitor(ports) {
+    if (!this.connected) {
+      throw new Error("Hub is not connected.");
+    }
+
+    const supportedPorts = ports.filter((port) => liveModesForDeviceId(port.deviceId).length);
+
+    await this.stopLiveMonitor().catch(() => {});
+
+    if (!supportedPorts.length) {
+      return false;
+    }
+
+    const nonce = makeNonce();
+    const code = makeLiveMonitorProgram(nonce, supportedPorts);
+
+    if (!code) {
+      return false;
+    }
+
+    try {
+      await this.#startFreshRepl();
+      this.liveNonce = nonce;
+      this.liveBuffer = "";
+      this.liveRunning = true;
+      this.stdout = "";
+      await this.writeStdin(
+        `\x05${code.replace(/\n/g, "\r\n")}\r\n\x04`,
+        `send live monitor (${supportedPorts.length} ports)`,
+        LIVE_MONITOR_WRITE
+      );
+
+      this.dispatchEvent(
+        new CustomEvent("live-started", {
+          detail: {
+            nonce,
+            ports: supportedPorts.map((port) => port.port)
+          }
+        })
+      );
+
+      return true;
+    } catch (error) {
+      this.liveNonce = null;
+      this.liveBuffer = "";
+      this.liveRunning = false;
+      await this.writeCommand(COMMAND.STOP_USER_PROGRAM, undefined, "stop live monitor after start failure").catch(() => {});
+      throw error;
+    }
+  }
+
+  async stopLiveMonitor() {
+    const wasLive = Boolean(this.liveNonce || this.liveRunning);
+
+    this.liveNonce = null;
+    this.liveBuffer = "";
+    this.liveRunning = false;
+
+    if (!wasLive || !this.connected) {
+      return false;
+    }
+
+    await this.writeStdin("\x03", "interrupt live monitor", SAFE_STDIN_WRITE).catch(() => {});
+    await this.writeCommand(COMMAND.STOP_USER_PROGRAM, undefined, "stop live monitor").catch(() => {});
+    await this.#waitForProgramRunning(false, 3000);
+    this.stdout = "";
+    this.stdoutDecoder = new TextDecoder();
+    return true;
+  }
+
   async scanPorts() {
     if (!this.connected) {
       throw new Error("Hub is not connected.");
+    }
+
+    if (this.liveNonce || this.liveRunning) {
+      await this.stopLiveMonitor();
     }
 
     if (!supportsWriteStdin(this.info?.profileVersion)) {
@@ -701,6 +880,11 @@ export class PybricksHubClient extends EventTarget {
       const text = this.stdoutDecoder.decode(dataViewToBytes(view, 1), { stream: true });
       this.stdout += text;
       this.dispatchEvent(new CustomEvent("stdout", { detail: text }));
+      this.#handleLiveStdout(text);
+
+      if (this.liveNonce && this.stdout.length > 12000) {
+        this.stdout = this.stdout.slice(-6000);
+      }
     }
   };
 
@@ -730,6 +914,9 @@ export class PybricksHubClient extends EventTarget {
     this.runningProgramId = 0;
     this.selectedSlot = 0;
     this.eventTrace = [];
+    this.liveNonce = null;
+    this.liveBuffer = "";
+    this.liveRunning = false;
   }
 
   #statusPreview() {
@@ -754,5 +941,40 @@ export class PybricksHubClient extends EventTarget {
 
   #eventTracePreview() {
     return this.eventTrace.length ? this.eventTrace.join(" | ") : "none";
+  }
+
+  #handleLiveStdout(text) {
+    if (!this.liveNonce || !text) {
+      return;
+    }
+
+    this.liveBuffer += text;
+
+    const lastLineBreak = Math.max(this.liveBuffer.lastIndexOf("\n"), this.liveBuffer.lastIndexOf("\r"));
+
+    if (lastLineBreak < 0) {
+      if (this.liveBuffer.length > 1200) {
+        this.liveBuffer = this.liveBuffer.slice(-600);
+      }
+      return;
+    }
+
+    const completed = this.liveBuffer.slice(0, lastLineBreak + 1);
+    this.liveBuffer = this.liveBuffer.slice(lastLineBreak + 1);
+
+    const result = parseLiveOutput(completed, this.liveNonce);
+
+    if (!result.values.length) {
+      return;
+    }
+
+    this.dispatchEvent(
+      new CustomEvent("live", {
+        detail: {
+          nonce: this.liveNonce,
+          values: result.values
+        }
+      })
+    );
   }
 }
