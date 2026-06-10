@@ -2,9 +2,11 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   deviceNameForId,
+  estimateBatteryPercentFromVoltage,
   makeInitialPorts,
   parseHubCapabilities,
   parseLiveOutput,
+  parseMotorSweepOutput,
   parsePnpId,
   parseScanOutput,
   parseSemver,
@@ -158,13 +160,27 @@ describe("parser", () => {
 
   it("parses live monitor values for a nonce", () => {
     const output = [
+      "I:live1:voltage:7790",
+      "I:live1:current:-120",
+      "I:live1:yaw:-39",
+      "I:live1:pitch:0",
+      "I:live1:roll:2",
       "L:live1:B:angle:350",
       "L:other:A:angle:999",
       "L:live1:A:force:0.5",
       "L:live1:B:speed:12"
     ].join("\n");
 
-    assert.deepEqual(parseLiveOutput(output, "live1").values, [
+    const result = parseLiveOutput(output, "live1");
+
+    assert.deepEqual(result.imu, {
+      voltage: "7790",
+      current: "-120",
+      yaw: "-39",
+      pitch: "0",
+      roll: "2"
+    });
+    assert.deepEqual(result.values, [
       {
         port: "A",
         mode: "force",
@@ -220,5 +236,72 @@ describe("parser", () => {
         error: "OSError"
       }
     ]);
+  });
+
+  it("estimates battery percent from voltage by hub profile", () => {
+    assert.equal(estimateBatteryPercentFromVoltage(7800, { id: 129 }), 82);
+    assert.equal(estimateBatteryPercentFromVoltage(8400, { id: 129 }), 100);
+    assert.equal(estimateBatteryPercentFromVoltage(7800, { id: 128 }), 55);
+    assert.equal(estimateBatteryPercentFromVoltage(Number.NaN, { id: 129 }), null);
+  });
+
+  it("parses motor dc sweep output", () => {
+    const output = [
+      "MT:m1:0:0:100:0",
+      "MT:m1:50:720:430:330",
+      "MT:other:100:999:999:999",
+      "MT:m1:-50:-600:410:310",
+      "MX:m1"
+    ].join("\n");
+
+    assert.deepEqual(parseMotorSweepOutput(output, "m1"), {
+      complete: true,
+      error: null,
+      points: [
+        {
+          dc: 0,
+          speedDegPerSecond: 0,
+          rpm: 0,
+          hubCurrentMa: 100,
+          currentMa: 0
+        },
+        {
+          dc: 50,
+          speedDegPerSecond: 720,
+          rpm: 120,
+          hubCurrentMa: 430,
+          currentMa: 330
+        },
+        {
+          dc: -50,
+          speedDegPerSecond: -600,
+          rpm: -100,
+          hubCurrentMa: 410,
+          currentMa: 310
+        }
+      ]
+    });
+  });
+
+  it("keeps old motor dc sweep rows without current data", () => {
+    assert.deepEqual(parseMotorSweepOutput("MT:m1:50:720\nMX:m1", "m1"), {
+      complete: true,
+      error: null,
+      points: [
+        {
+          dc: 50,
+          speedDegPerSecond: 720,
+          rpm: 120
+        }
+      ]
+    });
+  });
+
+  it("parses motor dc sweep errors", () => {
+    assert.deepEqual(parseMotorSweepOutput("ME:m1:OSError\nMX:m1", "m1"), {
+      complete: true,
+      error: "OSError",
+      points: []
+    });
   });
 });

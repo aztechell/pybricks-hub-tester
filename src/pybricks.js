@@ -1,8 +1,10 @@
 import {
+  estimateBatteryPercentFromVoltage,
   HUB_CAPABILITY,
   liveModesForDeviceId,
   parseHubCapabilities,
   parseLiveOutput,
+  parseMotorSweepOutput,
   parsePnpId,
   parseScanOutput,
   parseSemver,
@@ -66,6 +68,7 @@ const LIVE_MONITOR_WRITE = Object.freeze({
 });
 
 const LIVE_MONITOR_INTERVAL_MS = 350;
+const MOTOR_SWEEP_SETTLE_MS = 260;
 
 const MOTOR_DEVICE_IDS = Object.freeze([38, 46, 47, 48, 49, 65, 75, 76]);
 
@@ -90,8 +93,8 @@ function textFromDataView(view) {
   return new TextDecoder().decode(dataViewToBytes(view));
 }
 
-function formatBatteryVoltage(voltageMv) {
-  return Number.isFinite(voltageMv) ? `${(voltageMv / 1000).toFixed(2)} V` : null;
+function formatBatteryPercent(percent) {
+  return Number.isFinite(percent) ? `${clamp(Math.round(percent), 0, 100)}%` : null;
 }
 
 function makeNonce() {
@@ -163,10 +166,10 @@ function makePythonTuple(items) {
   return `(${items.join(",")})`;
 }
 
-function makeLiveMonitorProgram(nonce, ports) {
+function makeLiveMonitorProgram(nonce, ports, hubClass) {
   const livePorts = ports.filter((port) => liveModesForDeviceId(port.deviceId).length);
 
-  if (!livePorts.length) {
+  if (!livePorts.length && !hubClass) {
     return null;
   }
 
@@ -187,20 +190,42 @@ function makeLiveMonitorProgram(nonce, ports) {
     }
   }
 
+  const pupdeviceImport = importNames.size ? `from pybricks.pupdevices import ${[...importNames].join(",")}` : "";
+  const hubImport = hubClass ? `from pybricks.hubs import ${hubClass} as Hub` : "Hub=None";
+
   return `
 N="${nonce}"
 R=${portRows}
 M=${motorIds}
+H=None
+BR=True
+IR=True
+O=[]
+def flush():
+    global O
+    if O:
+        print("\\n".join(O))
+        O=[]
 def emit(p,m,v):
-    print("L:%s:%s:%s:%s"%(N,p,m,v))
+    O.append("L:%s:%s:%s:%s"%(N,p,m,v))
+def im(m,v):
+    O.append("I:%s:%s:%s"%(N,m,v))
 try:
     from pybricks.parameters import Port
-    from pybricks.pupdevices import ${[...importNames].join(",")}
+    ${pupdeviceImport}
+    ${hubImport}
     from pybricks.tools import wait
 except Exception as e:
     for n,i in R:
         emit(n,"error",type(e).__name__)
+    im("error",type(e).__name__)
+    flush()
     raise
+try:
+    if Hub:
+        H=Hub()
+except Exception as e:
+    im("error",type(e).__name__)
 def make(i,p):
     if i in M:return Motor(p,reset_angle=False)
     if i==63:return ForceSensor(p)
@@ -215,8 +240,25 @@ for n,i in R:
         if d:D.append((n,i,d))
     except Exception as e:
         emit(n,"error",type(e).__name__)
-print("LM:%s:S"%N)
+flush()
 while True:
+    O=[]
+    if H:
+        if BR:
+            try:
+                im("voltage",H.battery.voltage())
+                im("current",H.battery.current())
+            except Exception:
+                BR=False
+        if IR:
+            try:
+                p,r=H.imu.tilt()
+                im("yaw",round(H.imu.heading()))
+                im("pitch",round(p))
+                im("roll",round(r))
+            except Exception as e:
+                im("error",type(e).__name__)
+                IR=False
     for n,i,d in D:
         try:
             if i in M:
@@ -229,7 +271,51 @@ while True:
                 emit(n,"reflection",d.reflection());emit(n,"color",str(d.color()).split(".")[-1])
         except Exception as e:
             emit(n,"error",type(e).__name__)
+    flush()
     wait(${LIVE_MONITOR_INTERVAL_MS})
+`.trim();
+}
+
+function makeMotorSweepProgram(nonce, port, step, hubClass) {
+  const hubImport = hubClass ? `from pybricks.hubs import ${hubClass} as Hub` : "Hub=None";
+
+  return `
+from pybricks.parameters import Port
+from pybricks.pupdevices import Motor
+from pybricks.tools import wait
+${hubImport}
+N="${nonce}"
+S=${step}
+H=None
+IDLE=0
+def cur():
+    if not H:return ("","")
+    try:
+        c=H.battery.current()
+        return (c,c-IDLE)
+    except Exception:
+        return ("","")
+try:
+    if Hub:
+        H=Hub()
+        IDLE=H.battery.current()
+except Exception:
+    H=None
+m=Motor(getattr(Port,"${port}"),reset_angle=False)
+seq=[0]+list(range(S,101,S))+[0]+list(range(-S,-101,-S))+[0]
+try:
+    for d in seq:
+        try:
+            m.dc(d)
+            wait(${MOTOR_SWEEP_SETTLE_MS})
+            c,mc=cur()
+            print("MT:%s:%s:%s:%s:%s"%(N,d,m.speed(100),c,mc))
+        except Exception as e:
+            print("ME:%s:%s"%(N,type(e).__name__))
+            break
+finally:
+    m.stop()
+    print("MX:%s"%N)
 `.trim();
 }
 
@@ -346,12 +432,8 @@ export class PybricksHubClient extends EventTarget {
 
     await this.stopLiveMonitor().catch(() => {});
 
-    if (!supportedPorts.length) {
-      return false;
-    }
-
     const nonce = makeNonce();
-    const code = makeLiveMonitorProgram(nonce, supportedPorts);
+    const code = makeLiveMonitorProgram(nonce, supportedPorts, this.info?.model?.hubClass);
 
     if (!code) {
       return false;
@@ -517,6 +599,44 @@ export class PybricksHubClient extends EventTarget {
     throw lastScanError || new Error("Port scan failed.");
   }
 
+  async runMotorDcSweep({ port, step }) {
+    if (!this.connected) {
+      throw new Error("Hub is not connected.");
+    }
+
+    if (!supportsWriteStdin(this.info?.profileVersion)) {
+      throw new Error("Pybricks profile 1.3.0 or newer is required for motor testing.");
+    }
+
+    if (!["A", "B", "C", "D", "E", "F"].includes(port)) {
+      throw new Error("Select a motor port.");
+    }
+
+    if (![1, 5, 10].includes(step)) {
+      throw new Error("Select a DC step of 1, 5, or 10.");
+    }
+
+    await this.stopLiveMonitor().catch(() => {});
+
+    const nonce = makeNonce();
+    const code = makeMotorSweepProgram(nonce, port, step, this.info?.model?.hubClass);
+    const pointCount = 3 + Math.floor(100 / step) * 2;
+    const timeoutMs = Math.max(15000, pointCount * (MOTOR_SWEEP_SETTLE_MS + 120) + 8000);
+    const command = `\x05${code.replace(/\n/g, "\r\n")}\r\n\x04`;
+
+    try {
+      await this.#startFreshRepl();
+      this.stdout = "";
+      const resultPromise = this.#waitForMotorSweep(nonce, timeoutMs);
+      await this.writeStdin(command, `send motor sweep (${port}, ${step}%)`, LIVE_MONITOR_WRITE);
+      return await resultPromise;
+    } finally {
+      await this.writeCommand(COMMAND.STOP_USER_PROGRAM, undefined, "stop motor test").catch(() => {});
+      this.stdout = "";
+      this.stdoutDecoder = new TextDecoder();
+    }
+  }
+
   async writeStdin(text, context = "send stdin", options = SAFE_STDIN_WRITE) {
     const bytes = new TextEncoder().encode(text);
     const requestedChunkSize = options.chunkSize ?? SAFE_STDIN_WRITE.chunkSize;
@@ -621,6 +741,7 @@ export class PybricksHubClient extends EventTarget {
       firmwareVersion: "-",
       profileVersion: "-",
       batteryLevel: null,
+      batteryPercent: null,
       batteryVoltageMv: null,
       batteryText: null,
       pnpId: null
@@ -641,7 +762,8 @@ export class PybricksHubClient extends EventTarget {
         firmwareVersion,
         profileVersion,
         batteryLevel,
-        batteryText: Number.isFinite(batteryLevel) ? `${batteryLevel}%` : null,
+        batteryPercent: Number.isFinite(batteryLevel) ? batteryLevel : null,
+        batteryText: formatBatteryPercent(batteryLevel),
         pnpId,
         model: resolveHubModel(pnpId)
       };
@@ -749,13 +871,61 @@ export class PybricksHubClient extends EventTarget {
     });
   }
 
+  #waitForMotorSweep(nonce, timeoutMs) {
+    return new Promise((resolve, reject) => {
+      const timeoutId = window.setTimeout(() => {
+        cleanup();
+        const result = parseMotorSweepOutput(this.stdout, nonce);
+
+        if (result.points.length) {
+          resolve(result.points);
+          return;
+        }
+
+        reject(new Error(`Timed out waiting for motor test output. Last hub output: ${this.#stdoutPreview() || "none"}`));
+      }, timeoutMs);
+
+      const onStdout = () => {
+        const result = parseMotorSweepOutput(this.stdout, nonce);
+
+        if (!result.complete) {
+          return;
+        }
+
+        cleanup();
+
+        if (result.error) {
+          reject(new Error(`Motor test failed: ${result.error}`));
+          return;
+        }
+
+        if (!result.points.length) {
+          reject(new Error(`Motor test completed without data. Last hub output: ${this.#stdoutPreview() || "none"}`));
+          return;
+        }
+
+        resolve(result.points);
+      };
+
+      const cleanup = () => {
+        window.clearTimeout(timeoutId);
+        this.removeEventListener("stdout", onStdout);
+      };
+
+      this.addEventListener("stdout", onStdout);
+    });
+  }
+
   #applyScanMetadata(result) {
     if (!this.info || result.battery?.status !== "voltage") {
       return;
     }
 
     this.info.batteryVoltageMv = result.battery.voltageMv;
-    this.info.batteryText = formatBatteryVoltage(result.battery.voltageMv);
+    this.info.batteryPercent = Number.isFinite(this.info.batteryLevel)
+      ? this.info.batteryLevel
+      : estimateBatteryPercentFromVoltage(result.battery.voltageMv, this.info.model);
+    this.info.batteryText = formatBatteryPercent(this.info.batteryPercent);
   }
 
   #waitForStdout(predicate, timeoutMs) {
@@ -964,7 +1134,7 @@ export class PybricksHubClient extends EventTarget {
 
     const result = parseLiveOutput(completed, this.liveNonce);
 
-    if (!result.values.length) {
+    if (!result.values.length && !Object.keys(result.imu).length) {
       return;
     }
 
@@ -972,6 +1142,7 @@ export class PybricksHubClient extends EventTarget {
       new CustomEvent("live", {
         detail: {
           nonce: this.liveNonce,
+          imu: result.imu,
           values: result.values
         }
       })

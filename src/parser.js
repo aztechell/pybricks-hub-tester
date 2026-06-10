@@ -120,6 +120,29 @@ export const LIVE_DEVICE_PROFILES = Object.freeze({
 
 const LIVE_MODE_ORDER = Object.freeze(["angle", "speed", "force", "pressed", "distance", "reflection", "color", "error"]);
 
+const BATTERY_PROFILES = Object.freeze({
+  liIon2s: [
+    [6400, 0],
+    [6800, 10],
+    [7000, 20],
+    [7200, 35],
+    [7400, 55],
+    [7600, 70],
+    [7800, 82],
+    [8000, 92],
+    [8400, 100]
+  ],
+  sixCell: [
+    [6000, 0],
+    [6600, 10],
+    [7200, 35],
+    [7800, 55],
+    [8400, 75],
+    [9000, 90],
+    [9600, 100]
+  ]
+});
+
 export const HUB_CAPABILITY = Object.freeze({
   HAS_REPL: 1 << 0,
   HAS_PORT_VIEW: 1 << 3
@@ -131,6 +154,40 @@ export function deviceNameForId(deviceId) {
 
 export function liveModesForDeviceId(deviceId) {
   return LIVE_DEVICE_PROFILES[deviceId]?.modes ?? [];
+}
+
+export function isMotorDeviceId(deviceId) {
+  return LIVE_DEVICE_PROFILES[deviceId]?.kind === "motor";
+}
+
+export function estimateBatteryPercentFromVoltage(voltageMv, model = null) {
+  const voltage = Number(voltageMv);
+
+  if (!Number.isFinite(voltage)) {
+    return null;
+  }
+
+  const productId = typeof model === "number" ? model : model?.id;
+  const curve = productId === 129 || productId === 131 || (!productId && voltage <= 8500)
+    ? BATTERY_PROFILES.liIon2s
+    : BATTERY_PROFILES.sixCell;
+
+  if (voltage <= curve[0][0]) {
+    return 0;
+  }
+
+  for (let index = 1; index < curve.length; index += 1) {
+    const [rightVoltage, rightPercent] = curve[index];
+
+    if (voltage <= rightVoltage) {
+      const [leftVoltage, leftPercent] = curve[index - 1];
+      const ratio = (voltage - leftVoltage) / (rightVoltage - leftVoltage);
+
+      return Math.round(leftPercent + ratio * (rightPercent - leftPercent));
+    }
+  }
+
+  return 100;
 }
 
 export function parseSemver(value) {
@@ -361,10 +418,22 @@ export function parseScanOutput(text, nonce) {
 
 export function parseLiveOutput(text, nonce) {
   const byKey = new Map();
+  const imu = {};
 
   for (const rawLine of String(text).split(/[\r\n]+/)) {
     const line = rawLine.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "").trim();
     const parts = line.split(":");
+
+    if (parts.length >= 4 && parts[0] === "I" && parts[1] === nonce) {
+      const [, , mode, ...rest] = parts;
+      const value = rest.join(":");
+
+      if (["voltage", "current", "yaw", "pitch", "roll", "error"].includes(mode)) {
+        imu[mode] = value;
+      }
+
+      continue;
+    }
 
     if (parts.length < 5 || parts[0] !== "L" || parts[1] !== nonce) {
       continue;
@@ -387,6 +456,7 @@ export function parseLiveOutput(text, nonce) {
   }
 
   return {
+    imu,
     values: [...byKey.values()].sort((a, b) => {
       const portDelta = PORT_NAMES.indexOf(a.port) - PORT_NAMES.indexOf(b.port);
 
@@ -399,5 +469,61 @@ export function parseLiveOutput(text, nonce) {
 
       return aMode - bMode;
     })
+  };
+}
+
+export function parseMotorSweepOutput(text, nonce) {
+  const points = [];
+  let complete = false;
+  let error = null;
+
+  for (const rawLine of String(text).split(/[\r\n]+/)) {
+    const line = rawLine.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "").trim();
+    const parts = line.split(":");
+
+    if (parts.length >= 2 && parts[0] === "MX" && parts[1] === nonce) {
+      complete = true;
+      continue;
+    }
+
+    if (parts.length >= 3 && parts[0] === "ME" && parts[1] === nonce) {
+      error = parts.slice(2).join(":") || "Motor test failed";
+      continue;
+    }
+
+    if (parts.length < 4 || parts[0] !== "MT" || parts[1] !== nonce) {
+      continue;
+    }
+
+    const dc = Number(parts[2]);
+    const speedDegPerSecond = Number(parts[3]);
+    const hubCurrentMa = Number(parts[4]);
+    const currentMa = Number(parts[5]);
+
+    if (!Number.isFinite(dc) || !Number.isFinite(speedDegPerSecond)) {
+      continue;
+    }
+
+    const point = {
+      dc,
+      speedDegPerSecond,
+      rpm: speedDegPerSecond / 6
+    };
+
+    if (Number.isFinite(hubCurrentMa)) {
+      point.hubCurrentMa = hubCurrentMa;
+    }
+
+    if (Number.isFinite(currentMa)) {
+      point.currentMa = currentMa;
+    }
+
+    points.push(point);
+  }
+
+  return {
+    complete,
+    error,
+    points
   };
 }

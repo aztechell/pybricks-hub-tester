@@ -78,43 +78,99 @@
         </header>
 
         <nav class="dashboard-tabs" aria-label="Hub views">
-          <button class="tab tab--active" type="button">Dashboard</button>
+          <button class="tab tab--active" type="button" data-tab="dashboard" aria-selected="true">Dashboard</button>
+          <button class="tab" type="button" data-tab="motor-test" aria-selected="false">Motor Test</button>
         </nav>
 
         <main class="dashboard-stage">
-          <div class="hub-dashboard" id="hubDashboard" aria-label="Hub port map">
-            <div class="port-column port-column--left" id="leftPorts"></div>
-            <div class="hub-canvas">
-              <div class="hub-body" aria-hidden="true">
-                <div class="hub-slot hub-slot--top"></div>
-                <div class="hub-slot hub-slot--bottom"></div>
-                <div class="hub-screw hub-screw--tl"></div>
-                <div class="hub-screw hub-screw--tr"></div>
-                <div class="hub-screw hub-screw--bl"></div>
-                <div class="hub-screw hub-screw--br"></div>
-                <div class="hub-brand">Pybricks</div>
-                <div class="hub-screen">
-                  <span id="hubScreenText">PB</span>
-                </div>
-                <div class="hub-grid">
-                  <span></span><span></span><span></span>
-                  <span></span><span></span><span></span>
-                  <span></span><span></span><span></span>
-                  <span></span><span></span><span></span>
-                </div>
-                <div class="hub-button"></div>
-                <div class="hub-paddle hub-paddle--left"></div>
-                <div class="hub-paddle hub-paddle--right"></div>
-                <span class="hub-port-label hub-port-label--a" data-hub-port="A">A</span>
-                <span class="hub-port-label hub-port-label--b" data-hub-port="B">B</span>
-                <span class="hub-port-label hub-port-label--c" data-hub-port="C">C</span>
-                <span class="hub-port-label hub-port-label--d" data-hub-port="D">D</span>
-                <span class="hub-port-label hub-port-label--e" data-hub-port="E">E</span>
-                <span class="hub-port-label hub-port-label--f" data-hub-port="F">F</span>
+          <section class="tab-panel" data-tab-panel="dashboard">
+            <aside class="imu-panel" aria-label="Hub IMU">
+              <div class="imu-row">
+                <span class="imu-label">Voltage:</span>
+                <span id="hubVoltage" class="imu-value">-</span>
               </div>
+              <div class="imu-row">
+                <span class="imu-label">Current:</span>
+                <span id="hubCurrent" class="imu-value">-</span>
+              </div>
+              <div class="imu-row">
+                <span class="imu-label">Yaw:</span>
+                <span id="imuYaw" class="imu-value">-</span>
+              </div>
+              <div class="imu-row">
+                <span class="imu-label">Pitch:</span>
+                <span id="imuPitch" class="imu-value">-</span>
+              </div>
+              <div class="imu-row">
+                <span class="imu-label">Roll:</span>
+                <span id="imuRoll" class="imu-value">-</span>
+              </div>
+            </aside>
+            <div class="hub-dashboard" id="hubDashboard" aria-label="Hub port map">
+              <div class="port-column port-column--left" id="leftPorts"></div>
+              <div class="hub-canvas">
+                <div class="hub-body" aria-hidden="true">
+                  <div class="hub-slot hub-slot--top"></div>
+                  <div class="hub-slot hub-slot--bottom"></div>
+                  <div class="hub-screw hub-screw--tl"></div>
+                  <div class="hub-screw hub-screw--tr"></div>
+                  <div class="hub-screw hub-screw--bl"></div>
+                  <div class="hub-screw hub-screw--br"></div>
+                  <div class="hub-brand">Pybricks</div>
+                  <div class="hub-screen">
+                    <span id="hubScreenText">PB</span>
+                  </div>
+                  <div class="hub-grid">
+                    <span></span><span></span><span></span>
+                    <span></span><span></span><span></span>
+                    <span></span><span></span><span></span>
+                    <span></span><span></span><span></span>
+                  </div>
+                  <div class="hub-button"></div>
+                  <div class="hub-paddle hub-paddle--left"></div>
+                  <div class="hub-paddle hub-paddle--right"></div>
+                  <span class="hub-port-label hub-port-label--a" data-hub-port="A">A</span>
+                  <span class="hub-port-label hub-port-label--b" data-hub-port="B">B</span>
+                  <span class="hub-port-label hub-port-label--c" data-hub-port="C">C</span>
+                  <span class="hub-port-label hub-port-label--d" data-hub-port="D">D</span>
+                  <span class="hub-port-label hub-port-label--e" data-hub-port="E">E</span>
+                  <span class="hub-port-label hub-port-label--f" data-hub-port="F">F</span>
+                </div>
+              </div>
+              <div class="port-column port-column--right" id="rightPorts"></div>
             </div>
-            <div class="port-column port-column--right" id="rightPorts"></div>
-          </div>
+          </section>
+          <section class="tab-panel motor-test-panel" data-tab-panel="motor-test" hidden>
+            <div class="motor-test-controls">
+              <label class="field-label" for="motorPortSelect">Port</label>
+              <select id="motorPortSelect" class="field-control"></select>
+
+              <label class="field-label" for="motorStepSelect">DC step</label>
+              <select id="motorStepSelect" class="field-control">
+                <option value="1">1%</option>
+                <option value="5">5%</option>
+                <option value="10" selected>10%</option>
+              </select>
+
+              <button id="runMotorTestBtn" class="button button--primary motor-test-button" type="button" disabled>Run Test</button>
+              <button id="downloadMotorChartBtn" class="button motor-test-button" type="button" disabled>Download PNG</button>
+              <span id="motorTestStatus" class="motor-test-status">No motor selected</span>
+            </div>
+            <div class="motor-charts">
+              <section class="motor-chart-card" aria-label="DC to RPM">
+                <h2 class="motor-chart-title">DC -> RPM</h2>
+                <div class="motor-chart-shell">
+                  <svg id="motorChart" class="motor-chart" viewBox="0 0 720 360" role="img" aria-label="DC to RPM graph"></svg>
+                </div>
+              </section>
+              <section class="motor-chart-card" aria-label="DC to current">
+                <h2 class="motor-chart-title">DC -> Current</h2>
+                <div class="motor-chart-shell">
+                  <svg id="motorCurrentChart" class="motor-chart" viewBox="0 0 720 360" role="img" aria-label="DC to current graph"></svg>
+                </div>
+              </section>
+            </div>
+          </section>
           <div id="messageBox" class="message-box" role="status" aria-live="polite"></div>
         </main>
       </section>

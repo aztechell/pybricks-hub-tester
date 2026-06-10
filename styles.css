@@ -308,7 +308,13 @@ h1 {
   background: transparent;
   font-size: 16px;
   text-transform: uppercase;
-  cursor: default;
+  cursor: pointer;
+}
+
+.tab:focus-visible {
+  outline: 2px solid rgb(45 131 183 / 32%);
+  outline-offset: 6px;
+  border-radius: 3px;
 }
 
 .tab--active {
@@ -327,11 +333,179 @@ h1 {
 }
 
 .dashboard-stage {
+  position: relative;
   display: grid;
   grid-template-rows: minmax(0, 1fr) auto;
   min-height: 0;
   padding: clamp(20px, 3vh, 30px) 50px 14px;
   background: #ffffff;
+}
+
+.tab-panel {
+  position: relative;
+  height: 100%;
+  min-height: 0;
+}
+
+.motor-test-panel {
+  height: 100%;
+}
+
+.motor-test-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+  min-height: 54px;
+  margin-bottom: 18px;
+}
+
+.field-label {
+  color: var(--muted);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.field-control {
+  min-height: 38px;
+  min-width: 110px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  padding: 0 10px;
+  color: var(--ink);
+  background: var(--surface);
+  font: inherit;
+}
+
+.field-control:disabled {
+  color: var(--faint);
+  background: var(--surface-soft);
+}
+
+.motor-test-button {
+  min-width: 132px;
+  min-height: 38px;
+  padding: 0 16px;
+}
+
+.motor-test-status {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.motor-charts {
+  height: calc(100% - 72px);
+  min-height: 260px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.motor-chart-card {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+}
+
+.motor-chart-title {
+  margin: 0 0 8px;
+  color: var(--ink);
+  font-size: 15px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.motor-chart-shell {
+  min-width: 0;
+  min-height: 260px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.motor-chart {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 260px;
+}
+
+.chart-grid {
+  stroke: #e8e8e8;
+  stroke-width: 1;
+}
+
+.chart-axis,
+.chart-axis-zero {
+  stroke: #b9b9b9;
+  stroke-width: 1.4;
+}
+
+.chart-axis-zero {
+  stroke: #9d9d9d;
+}
+
+.chart-line {
+  fill: none;
+  stroke: var(--blue);
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.chart-point {
+  fill: #ffffff;
+  stroke: var(--blue);
+  stroke-width: 2;
+}
+
+.chart-tick,
+.chart-label,
+.chart-empty {
+  fill: var(--muted);
+  font-size: 13px;
+}
+
+.chart-label {
+  font-weight: 650;
+}
+
+.chart-label--vertical {
+  writing-mode: tb;
+  glyph-orientation-vertical: 0;
+}
+
+.chart-empty {
+  fill: var(--faint);
+  font-size: 18px;
+}
+
+.imu-panel {
+  position: absolute;
+  top: clamp(22px, 4vh, 44px);
+  left: clamp(18px, 2.8vw, 42px);
+  z-index: 2;
+  display: grid;
+  gap: 8px;
+  min-width: 132px;
+  color: #989898;
+  font-size: 16px;
+  line-height: 1.1;
+  pointer-events: none;
+}
+
+.imu-row {
+  display: grid;
+  grid-template-columns: 66px minmax(42px, auto);
+  gap: 7px;
+  align-items: baseline;
+}
+
+.imu-value {
+  color: #777777;
+  font-weight: 560;
+  white-space: nowrap;
 }
 
 .hub-dashboard {
@@ -446,16 +620,6 @@ h1 {
   align-items: center;
   min-height: 86px;
   color: var(--muted);
-}
-
-.port-tile[data-switchable="true"] {
-  cursor: pointer;
-}
-
-.port-tile[data-switchable="true"]:focus-visible {
-  outline: 3px solid rgb(45 131 183 / 28%);
-  outline-offset: 6px;
-  border-radius: 8px;
 }
 
 .port-column .port-tile {
@@ -613,17 +777,35 @@ h1 {
   line-height: 1.12;
 }
 
-.port-detail--switchable::after {
+.port-mode-button {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  border: 0;
+  padding: 0;
+  color: var(--blue);
+  background: transparent;
+  cursor: pointer;
+  text-align: inherit;
+}
+
+.port-mode-button::after {
   display: inline-block;
   width: 0;
   height: 0;
   margin-left: 7px;
-  transform: translateY(-1px);
+  transform: translateY(1px);
   border-top: 5px solid currentColor;
   border-right: 4px solid transparent;
   border-left: 4px solid transparent;
   content: "";
-  opacity: 0.72;
+  opacity: 0.62;
+}
+
+.port-mode-button:focus-visible {
+  outline: 2px solid rgb(45 131 183 / 32%);
+  outline-offset: 4px;
+  border-radius: 4px;
 }
 
 .port-tile--device .port-device,
@@ -673,6 +855,10 @@ h1 {
 
   .dashboard-stage {
     padding: 32px 28px 24px;
+  }
+
+  .imu-panel {
+    left: 22px;
   }
 
   .hub-dashboard {
@@ -750,6 +936,12 @@ h1 {
     padding: 14px 42px 10px;
   }
 
+  .imu-panel {
+    top: 16px;
+    left: 24px;
+    font-size: 14px;
+  }
+
   .hub-dashboard {
     --hub-visual-height: min(100%, 394px);
   }
@@ -819,6 +1011,17 @@ h1 {
 
   .dashboard-stage {
     padding: 24px 18px 20px;
+  }
+
+  .motor-charts {
+    grid-template-columns: 1fr;
+    height: auto;
+  }
+
+  .imu-panel {
+    position: static;
+    margin-bottom: 18px;
+    pointer-events: auto;
   }
 
   .hub-dashboard {
