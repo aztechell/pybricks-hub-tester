@@ -348,6 +348,9 @@ h1 {
 }
 
 .motor-test-panel {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: 14px;
   height: 100%;
 }
 
@@ -357,7 +360,6 @@ h1 {
   align-items: center;
   gap: 10px 14px;
   min-height: 54px;
-  margin-bottom: 18px;
 }
 
 .field-label {
@@ -393,8 +395,51 @@ h1 {
   font-size: 13px;
 }
 
+.motor-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.motor-metric {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: #ffffff;
+}
+
+.motor-metric__label {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.motor-metric__value {
+  overflow: hidden;
+  margin-top: 3px;
+  color: var(--ink);
+  font-size: 20px;
+  font-weight: 740;
+  line-height: 1.15;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.motor-metric__detail {
+  overflow: hidden;
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .motor-charts {
-  height: calc(100% - 72px);
+  height: auto;
   min-height: 260px;
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -777,10 +822,18 @@ h1 {
   line-height: 1.12;
 }
 
-.port-mode-button {
+.port-mode-display {
   display: inline-flex;
   align-items: center;
+  gap: 5px;
   max-width: 100%;
+}
+
+.port-column--left .port-mode-display {
+  justify-content: flex-end;
+}
+
+.port-mode-button {
   border: 0;
   padding: 0;
   color: var(--blue);
@@ -789,7 +842,22 @@ h1 {
   text-align: inherit;
 }
 
+.port-mode-label {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.port-mode-value {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--blue);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .port-mode-button::after {
+  flex: 0 0 auto;
   display: inline-block;
   width: 0;
   height: 0;
@@ -806,6 +874,66 @@ h1 {
   outline: 2px solid rgb(45 131 183 / 32%);
   outline-offset: 4px;
   border-radius: 4px;
+}
+
+.port-mode-menu {
+  position: absolute;
+  z-index: 20;
+  width: min(220px, calc(100% - 24px));
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  padding: 6px;
+  background: #ffffff;
+  box-shadow: 0 14px 30px rgb(0 0 0 / 14%);
+}
+
+.port-mode-menu__item {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  width: 100%;
+  min-height: 34px;
+  border: 0;
+  border-radius: 6px;
+  padding: 6px 8px;
+  color: var(--ink);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.port-mode-menu__item:hover,
+.port-mode-menu__item:focus-visible {
+  outline: none;
+  background: var(--surface-soft);
+}
+
+.port-mode-menu__item[aria-checked="true"] {
+  color: var(--blue);
+  font-weight: 700;
+}
+
+.port-mode-menu__check {
+  color: var(--blue);
+  text-align: center;
+}
+
+.port-mode-menu__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.port-mode-menu__value {
+  max-width: 86px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .port-tile--device .port-device,
@@ -1018,6 +1146,10 @@ h1 {
     height: auto;
   }
 
+  .motor-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .imu-panel {
     position: static;
     margin-bottom: 18px;
@@ -1120,6 +1252,10 @@ h1 {
   }
 
   .port-column {
+    grid-template-columns: 1fr;
+  }
+
+  .motor-summary {
     grid-template-columns: 1fr;
   }
 }

@@ -70,7 +70,7 @@ export const DEVICE_NAMES = Object.freeze({
 export const LIVE_DEVICE_PROFILES = Object.freeze({
   37: {
     kind: "color-distance",
-    modes: ["reflection", "color"]
+    modes: ["reflection", "ambient", "hsv", "rgb", "color"]
   },
   38: {
     kind: "motor",
@@ -94,7 +94,7 @@ export const LIVE_DEVICE_PROFILES = Object.freeze({
   },
   61: {
     kind: "color",
-    modes: ["reflection", "color"]
+    modes: ["reflection", "ambient", "hsv", "rgb", "color"]
   },
   62: {
     kind: "ultrasonic",
@@ -118,7 +118,19 @@ export const LIVE_DEVICE_PROFILES = Object.freeze({
   }
 });
 
-const LIVE_MODE_ORDER = Object.freeze(["angle", "speed", "force", "pressed", "distance", "reflection", "color", "error"]);
+const LIVE_MODE_ORDER = Object.freeze([
+  "angle",
+  "speed",
+  "force",
+  "pressed",
+  "distance",
+  "reflection",
+  "ambient",
+  "hsv",
+  "rgb",
+  "color",
+  "error"
+]);
 
 const BATTERY_PROFILES = Object.freeze({
   liIon2s: [
@@ -474,8 +486,25 @@ export function parseLiveOutput(text, nonce) {
 
 export function parseMotorSweepOutput(text, nonce) {
   const points = [];
+  const metrics = {
+    backlash: {
+      positiveDeg: null,
+      negativeDeg: null,
+      status: "not_run",
+      error: null
+    }
+  };
   let complete = false;
   let error = null;
+
+  const parseBacklashValue = (value) => {
+    if (value === "N" || value === "") {
+      return null;
+    }
+
+    const number = Number(value);
+    return Number.isFinite(number) ? number : null;
+  };
 
   for (const rawLine of String(text).split(/[\r\n]+/)) {
     const line = rawLine.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "").trim();
@@ -488,6 +517,27 @@ export function parseMotorSweepOutput(text, nonce) {
 
     if (parts.length >= 3 && parts[0] === "ME" && parts[1] === nonce) {
       error = parts.slice(2).join(":") || "Motor test failed";
+      continue;
+    }
+
+    if (parts.length >= 4 && parts[0] === "MB" && parts[1] === nonce) {
+      const positiveRaw = parts[2] ?? "";
+      const negativeRaw = parts[3] ?? "";
+      const positiveError = positiveRaw.startsWith("X") ? positiveRaw.slice(1) || "Error" : null;
+      const negativeError = negativeRaw.startsWith("X") ? negativeRaw.slice(1) || "Error" : null;
+      const positiveDeg = positiveError ? null : parseBacklashValue(positiveRaw);
+      const negativeDeg = negativeError ? null : parseBacklashValue(negativeRaw);
+
+      metrics.backlash = {
+        positiveDeg,
+        negativeDeg,
+        status: positiveError || negativeError
+          ? "error"
+          : Number.isFinite(positiveDeg) || Number.isFinite(negativeDeg)
+            ? "ok"
+            : "not_detected",
+        error: positiveError || negativeError
+      };
       continue;
     }
 
@@ -524,6 +574,7 @@ export function parseMotorSweepOutput(text, nonce) {
   return {
     complete,
     error,
-    points
+    points,
+    metrics
   };
 }

@@ -69,6 +69,11 @@ const LIVE_MONITOR_WRITE = Object.freeze({
 
 const LIVE_MONITOR_INTERVAL_MS = 350;
 const MOTOR_SWEEP_SETTLE_MS = 260;
+const MOTOR_BACKLASH_TAKEUP_MS = 360;
+const MOTOR_BACKLASH_SAMPLE_MS = 20;
+const MOTOR_BACKLASH_SAMPLES = 60;
+const MOTOR_BACKLASH_DUTY = 28;
+const MOTOR_BACKLASH_LOAD_THRESHOLD_MNM = 5;
 
 const MOTOR_DEVICE_IDS = Object.freeze([38, 46, 47, 48, 49, 65, 75, 76]);
 
@@ -210,6 +215,8 @@ def emit(p,m,v):
     O.append("L:%s:%s:%s:%s"%(N,p,m,v))
 def im(m,v):
     O.append("I:%s:%s:%s"%(N,m,v))
+def hs(c):
+    return "%s,%s,%s"%(round(c.h),round(c.s),round(c.v))
 try:
     from pybricks.parameters import Port
     ${pupdeviceImport}
@@ -268,7 +275,14 @@ while True:
             elif i==62:
                 emit(n,"distance",d.distance()//10)
             elif i in (37,61):
-                emit(n,"reflection",d.reflection());emit(n,"color",str(d.color()).split(".")[-1])
+                try:emit(n,"reflection",d.reflection())
+                except Exception:pass
+                try:emit(n,"ambient",d.ambient())
+                except Exception:pass
+                try:emit(n,"hsv",hs(d.hsv()))
+                except Exception:pass
+                try:emit(n,"color",str(d.color()).split(".")[-1])
+                except Exception as e:emit(n,"error",type(e).__name__)
         except Exception as e:
             emit(n,"error",type(e).__name__)
     flush()
@@ -303,6 +317,30 @@ except Exception:
     H=None
 m=Motor(getattr(Port,"${port}"),reset_angle=False)
 seq=[0]+list(range(S,101,S))+[0]+list(range(-S,-101,-S))+[0]
+def bl(v):
+    try:
+        m.dc(v*${MOTOR_BACKLASH_DUTY})
+        wait(${MOTOR_BACKLASH_TAKEUP_MS})
+        m.brake()
+        wait(120)
+        a0=m.angle()
+        m.dc(-v*${MOTOR_BACKLASH_DUTY})
+        for _ in range(${MOTOR_BACKLASH_SAMPLES}):
+            wait(${MOTOR_BACKLASH_SAMPLE_MS})
+            a=abs(m.angle()-a0)
+            try:l=abs(m.load())
+            except Exception:l=0
+            if a>=1 and l>=${MOTOR_BACKLASH_LOAD_THRESHOLD_MNM}:
+                m.brake()
+                wait(80)
+                return a
+        m.brake()
+        wait(80)
+        return "N"
+    except Exception as e:
+        try:m.brake()
+        except Exception:pass
+        return "X"+type(e).__name__
 try:
     for d in seq:
         try:
@@ -313,6 +351,7 @@ try:
         except Exception as e:
             print("ME:%s:%s"%(N,type(e).__name__))
             break
+    print("MB:%s:%s:%s"%(N,bl(1),bl(-1)))
 finally:
     m.stop()
     print("MX:%s"%N)
@@ -621,7 +660,9 @@ export class PybricksHubClient extends EventTarget {
     const nonce = makeNonce();
     const code = makeMotorSweepProgram(nonce, port, step, this.info?.model?.hubClass);
     const pointCount = 3 + Math.floor(100 / step) * 2;
-    const timeoutMs = Math.max(15000, pointCount * (MOTOR_SWEEP_SETTLE_MS + 120) + 8000);
+    const backlashTimeoutMs =
+      2 * (MOTOR_BACKLASH_TAKEUP_MS + 200 + MOTOR_BACKLASH_SAMPLES * MOTOR_BACKLASH_SAMPLE_MS);
+    const timeoutMs = Math.max(15000, pointCount * (MOTOR_SWEEP_SETTLE_MS + 120) + backlashTimeoutMs + 8000);
     const command = `\x05${code.replace(/\n/g, "\r\n")}\r\n\x04`;
 
     try {
@@ -878,7 +919,7 @@ export class PybricksHubClient extends EventTarget {
         const result = parseMotorSweepOutput(this.stdout, nonce);
 
         if (result.points.length) {
-          resolve(result.points);
+          resolve(result);
           return;
         }
 
@@ -904,7 +945,7 @@ export class PybricksHubClient extends EventTarget {
           return;
         }
 
-        resolve(result.points);
+        resolve(result);
       };
 
       const cleanup = () => {

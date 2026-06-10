@@ -168,7 +168,11 @@ describe("parser", () => {
       "L:live1:B:angle:350",
       "L:other:A:angle:999",
       "L:live1:A:force:0.5",
-      "L:live1:B:speed:12"
+      "L:live1:B:speed:12",
+      "L:live1:C:color:BLUE",
+      "L:live1:C:hsv:240,80,70",
+      "L:live1:C:ambient:14",
+      "L:live1:C:reflection:55"
     ].join("\n");
 
     const result = parseLiveOutput(output, "live1");
@@ -200,6 +204,34 @@ describe("parser", () => {
         mode: "speed",
         status: "value",
         value: "12",
+        error: null
+      },
+      {
+        port: "C",
+        mode: "reflection",
+        status: "value",
+        value: "55",
+        error: null
+      },
+      {
+        port: "C",
+        mode: "ambient",
+        status: "value",
+        value: "14",
+        error: null
+      },
+      {
+        port: "C",
+        mode: "hsv",
+        status: "value",
+        value: "240,80,70",
+        error: null
+      },
+      {
+        port: "C",
+        mode: "color",
+        status: "value",
+        value: "BLUE",
         error: null
       }
     ]);
@@ -251,6 +283,7 @@ describe("parser", () => {
       "MT:m1:50:720:430:330",
       "MT:other:100:999:999:999",
       "MT:m1:-50:-600:410:310",
+      "MB:m1:2.5:N",
       "MX:m1"
     ].join("\n");
 
@@ -279,7 +312,15 @@ describe("parser", () => {
           hubCurrentMa: 410,
           currentMa: 310
         }
-      ]
+      ],
+      metrics: {
+        backlash: {
+          positiveDeg: 2.5,
+          negativeDeg: null,
+          status: "ok",
+          error: null
+        }
+      }
     });
   });
 
@@ -293,7 +334,15 @@ describe("parser", () => {
           speedDegPerSecond: 720,
           rpm: 120
         }
-      ]
+      ],
+      metrics: {
+        backlash: {
+          positiveDeg: null,
+          negativeDeg: null,
+          status: "not_run",
+          error: null
+        }
+      }
     });
   });
 
@@ -301,7 +350,26 @@ describe("parser", () => {
     assert.deepEqual(parseMotorSweepOutput("ME:m1:OSError\nMX:m1", "m1"), {
       complete: true,
       error: "OSError",
-      points: []
+      points: [],
+      metrics: {
+        backlash: {
+          positiveDeg: null,
+          negativeDeg: null,
+          status: "not_run",
+          error: null
+        }
+      }
+    });
+  });
+
+  it("parses motor backlash probe errors", () => {
+    assert.deepEqual(parseMotorSweepOutput("MB:m1:XOSError:N\nMX:m1", "m1").metrics, {
+      backlash: {
+        positiveDeg: null,
+        negativeDeg: null,
+        status: "error",
+        error: "OSError"
+      }
     });
   });
 });

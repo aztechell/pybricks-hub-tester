@@ -26,6 +26,7 @@ const leftPorts = document.querySelector("#leftPorts");
 const rightPorts = document.querySelector("#rightPorts");
 const portCount = document.querySelector("#portCount");
 const messageBox = document.querySelector("#messageBox");
+const dashboardStage = document.querySelector(".dashboard-stage");
 const hubVoltage = document.querySelector("#hubVoltage");
 const hubCurrent = document.querySelector("#hubCurrent");
 const imuYaw = document.querySelector("#imuYaw");
@@ -38,8 +39,10 @@ const motorStepSelect = document.querySelector("#motorStepSelect");
 const runMotorTestBtn = document.querySelector("#runMotorTestBtn");
 const downloadMotorChartBtn = document.querySelector("#downloadMotorChartBtn");
 const motorTestStatus = document.querySelector("#motorTestStatus");
+const motorSummary = document.querySelector("#motorSummary");
 const motorChart = document.querySelector("#motorChart");
 const motorCurrentChart = document.querySelector("#motorCurrentChart");
+const portModeMenu = document.querySelector("#portModeMenu");
 const hubPortLabels = [...document.querySelectorAll("[data-hub-port]")];
 
 const client = new PybricksHubClient();
@@ -54,6 +57,20 @@ const HUB_IMAGE_BY_PRODUCT_ID = Object.freeze({
 });
 
 const SENSOR_DEVICE_IDS = new Set([8, 34, 35, 37, 61, 62, 63, 64]);
+const LIVE_MODE_LABELS = Object.freeze({
+  angle: "Angle",
+  speed: "Speed",
+  force: "Force",
+  pressed: "Pressed",
+  distance: "Distance",
+  reflection: "Reflection",
+  ambient: "Ambient",
+  hsv: "HSV",
+  rgb: "RGB",
+  color: "Color",
+  error: "Error"
+});
+const MOTOR_START_RPM_THRESHOLD = 5;
 
 const state = {
   connected: false,
@@ -70,8 +87,10 @@ const state = {
   },
   liveValues: new Map(),
   selectedModeByPort: new Map(),
+  openModeMenuPort: "",
   motorTest: {
     data: [],
+    metrics: null,
     running: false,
     selectedPort: "",
     step: 10
@@ -83,6 +102,10 @@ const state = {
 let renderQueued = false;
 
 function setActiveTab(tabName) {
+  if (tabName !== "dashboard") {
+    closeModeMenu(false);
+  }
+
   for (const button of tabButtons) {
     const isActive = button.dataset.tab === tabName;
     button.classList.toggle("tab--active", isActive);
@@ -203,6 +226,64 @@ function selectedLiveMode(port) {
   return modes.includes(selected) ? selected : modes[0];
 }
 
+function liveModeLabel(mode) {
+  return LIVE_MODE_LABELS[mode] ?? String(mode || "").replace(/^\w/, (letter) => letter.toUpperCase());
+}
+
+function parseHsvValue(value) {
+  const parts = String(value ?? "").split(",").map((part) => Number(part.trim()));
+
+  if (parts.length !== 3 || parts.some((part) => !Number.isFinite(part))) {
+    return null;
+  }
+
+  return {
+    h: ((parts[0] % 360) + 360) % 360,
+    s: Math.max(0, Math.min(100, parts[1])),
+    v: Math.max(0, Math.min(100, parts[2]))
+  };
+}
+
+function hsvToRgb(value) {
+  const hsv = parseHsvValue(value);
+
+  if (!hsv) {
+    return null;
+  }
+
+  const h = hsv.h / 60;
+  const s = hsv.s / 100;
+  const v = hsv.v / 100;
+  const c = v * s;
+  const x = c * (1 - Math.abs((h % 2) - 1));
+  const m = v - c;
+  let r = 0;
+  let g = 0;
+  let b = 0;
+
+  if (h < 1) {
+    r = c;
+    g = x;
+  } else if (h < 2) {
+    r = x;
+    g = c;
+  } else if (h < 3) {
+    g = c;
+    b = x;
+  } else if (h < 4) {
+    g = x;
+    b = c;
+  } else if (h < 5) {
+    r = x;
+    b = c;
+  } else {
+    r = c;
+    b = x;
+  }
+
+  return [r, g, b].map((channel) => Math.round((channel + m) * 255));
+}
+
 function formatLiveValue(reading) {
   const value = String(reading.value ?? "").trim();
 
@@ -230,7 +311,63 @@ function formatLiveValue(reading) {
     return `${value}%`;
   }
 
+  if (reading.mode === "ambient") {
+    return `${value}%`;
+  }
+
+  if (reading.mode === "hsv") {
+    const hsv = parseHsvValue(value);
+
+    return hsv ? `${Math.round(hsv.h)}, ${Math.round(hsv.s)}, ${Math.round(hsv.v)}` : value || "...";
+  }
+
+  if (reading.mode === "rgb") {
+    const rgb = hsvToRgb(value);
+
+    return rgb ? rgb.join(", ") : value || "...";
+  }
+
   return value || "...";
+}
+
+function liveValueForMode(port, mode) {
+  if (mode === "rgb") {
+    const hsvReading = state.liveValues.get(liveValueKey(port.port, "hsv"));
+
+    if (hsvReading) {
+      return {
+        text: formatLiveValue({ ...hsvReading, mode: "rgb" }),
+        live: true,
+        status: "value"
+      };
+    }
+  }
+
+  const reading = state.liveValues.get(liveValueKey(port.port, mode));
+
+  if (reading) {
+    return {
+      text: formatLiveValue(reading),
+      live: true,
+      status: "value"
+    };
+  }
+
+  const error = state.liveValues.get(liveValueKey(port.port, "error"));
+
+  if (error) {
+    return {
+      text: formatLiveValue(error),
+      live: false,
+      status: "error"
+    };
+  }
+
+  return {
+    text: "...",
+    live: true,
+    status: "pending"
+  };
 }
 
 function formatImuValue(value) {
@@ -397,6 +534,121 @@ function formatChartTick(value) {
   return value.toFixed(1).replace(/\.0$/, "");
 }
 
+function formatChartValue(value) {
+  if (!Number.isFinite(value)) {
+    return "-";
+  }
+
+  if (Math.abs(value) >= 10 || Number.isInteger(value)) {
+    return String(Math.round(value));
+  }
+
+  return value.toFixed(1).replace(/\.0$/, "");
+}
+
+function signedNumber(value, unit = "") {
+  const number = Number(value);
+
+  if (!Number.isFinite(number)) {
+    return "-";
+  }
+
+  const text = Math.abs(number) >= 10 || Number.isInteger(number)
+    ? String(Math.round(number))
+    : number.toFixed(1).replace(/\.0$/, "");
+
+  return `${number > 0 ? "+" : ""}${text}${unit}`;
+}
+
+function motorStartupDuty(points, sign) {
+  return points
+    .filter((point) => (sign > 0 ? point.dc > 0 : point.dc < 0))
+    .sort((a, b) => Math.abs(a.dc) - Math.abs(b.dc))
+    .find((point) => Math.abs(point.value) >= MOTOR_START_RPM_THRESHOLD)?.dc ?? null;
+}
+
+function motorMaxRpm(points, sign) {
+  const matching = points.filter((point) => (sign > 0 ? point.dc > 0 : point.dc < 0));
+
+  if (!matching.length) {
+    return null;
+  }
+
+  return matching.reduce((best, point) => (Math.abs(point.value) > Math.abs(best.value) ? point : best)).value;
+}
+
+function formatDualPercent(positive, negative) {
+  const positiveText = Number.isFinite(positive) ? signedNumber(positive, "%") : "-";
+  const negativeText = Number.isFinite(negative) ? signedNumber(negative, "%") : "-";
+
+  return `${positiveText} / ${negativeText}`;
+}
+
+function formatDualRpm(positive, negative) {
+  const positiveText = Number.isFinite(positive) ? `${signedNumber(positive)} rpm` : "-";
+  const negativeText = Number.isFinite(negative) ? `${signedNumber(negative)} rpm` : "-";
+
+  return `${positiveText} / ${negativeText}`;
+}
+
+function formatBacklash(backlash) {
+  if (!backlash || backlash.status === "not_run") {
+    return {
+      value: "-",
+      detail: "run motor test"
+    };
+  }
+
+  if (backlash.status === "error") {
+    return {
+      value: "Error",
+      detail: backlash.error || "backlash probe failed"
+    };
+  }
+
+  if (backlash.status === "not_detected") {
+    return {
+      value: "Not detected",
+      detail: "no load edge"
+    };
+  }
+
+  const positive = Number.isFinite(backlash.positiveDeg) ? signedNumber(backlash.positiveDeg, "\u00b0") : "-";
+  const negative = Number.isFinite(backlash.negativeDeg) ? signedNumber(backlash.negativeDeg, "\u00b0") : "-";
+
+  return {
+    value: `${positive} / ${negative}`,
+    detail: "forward / reverse"
+  };
+}
+
+function motorSummaryItems() {
+  const points = averageDuplicateDc(state.motorTest.data, "rpm");
+  const positiveStartup = motorStartupDuty(points, 1);
+  const negativeStartup = motorStartupDuty(points, -1);
+  const positiveMaxRpm = motorMaxRpm(points, 1);
+  const negativeMaxRpm = motorMaxRpm(points, -1);
+  const backlash = formatBacklash(state.motorTest.metrics?.backlash);
+
+  return [
+    {
+      label: "Startup duty",
+      value: formatDualPercent(positiveStartup, negativeStartup),
+      detail: `first >= ${MOTOR_START_RPM_THRESHOLD} rpm`
+    },
+    {
+      label: "Max RPM",
+      value: formatDualRpm(positiveMaxRpm, negativeMaxRpm),
+      detail: "forward / reverse"
+    },
+    {
+      label: "Backlash",
+      value: backlash.value,
+      detail: backlash.detail
+    }
+  ];
+}
+
 function svgElement(name, attributes = {}, text = "") {
   const element = document.createElementNS("http://www.w3.org/2000/svg", name);
 
@@ -411,7 +663,10 @@ function svgElement(name, attributes = {}, text = "") {
   return element;
 }
 
-function renderMotorChart(chart, { valueKey, yLabel, lineColor, symmetric = false, emptyText = "No data" }) {
+function renderMotorChart(
+  chart,
+  { valueKey, yLabel, valueName, valueUnit, lineColor, symmetric = false, emptyText = "No data" }
+) {
   const width = 720;
   const height = 360;
   const margin = {
@@ -423,6 +678,18 @@ function renderMotorChart(chart, { valueKey, yLabel, lineColor, symmetric = fals
   const plotWidth = width - margin.left - margin.right;
   const plotHeight = height - margin.top - margin.bottom;
   const points = averageDuplicateDc(state.motorTest.data, valueKey);
+  const renderSignature = [
+    valueKey,
+    yLabel,
+    lineColor,
+    symmetric ? "sym" : "pos",
+    points.map((point) => `${point.dc}:${formatChartValue(point.value)}`).join("|")
+  ].join(";");
+
+  if (chart.dataset.renderSignature === renderSignature) {
+    return;
+  }
+
   const { min: yMin, max: yMax } = chartBounds(points, symmetric);
   const xFor = (dc) => margin.left + ((dc + 100) / 200) * plotWidth;
   const yFor = (value) => margin.top + ((yMax - value) / (yMax - yMin || 1)) * plotHeight;
@@ -438,6 +705,13 @@ function renderMotorChart(chart, { valueKey, yLabel, lineColor, symmetric = fals
     .chart-axis-zero{stroke:#9d9d9d}
     .chart-line{fill:none;stroke:${lineColor};stroke-width:3;stroke-linecap:round;stroke-linejoin:round}
     .chart-point{fill:#fff;stroke:${lineColor};stroke-width:2}
+    .chart-point-group{cursor:crosshair;outline:none}
+    .chart-point-hit{fill:transparent;stroke:transparent;pointer-events:all}
+    .chart-tooltip{opacity:0;pointer-events:none}
+    .chart-point-group:hover .chart-tooltip,.chart-point-group:focus .chart-tooltip,.chart-point-group:focus-visible .chart-tooltip{opacity:1}
+    .chart-tooltip-box{fill:#fff;stroke:#d0d0d0;stroke-width:1.2}
+    .chart-tooltip-title{fill:#2f2f2f;font:700 13px system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+    .chart-tooltip-text{fill:#666;font:12px system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
     .chart-tick,.chart-label,.chart-empty{fill:#737373;font:13px system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
     .chart-label{font-weight:650}
     .chart-empty{fill:#a7a7a7;font-size:18px}
@@ -472,19 +746,72 @@ function renderMotorChart(chart, { valueKey, yLabel, lineColor, symmetric = fals
     children.push(svgElement("path", { d: path, class: "chart-line" }));
 
     for (const point of points) {
-      children.push(svgElement("circle", { cx: xFor(point.dc), cy: yFor(point.value), r: 3.2, class: "chart-point" }));
+      const cx = xFor(point.dc);
+      const cy = yFor(point.value);
+      const tooltipWidth = 136;
+      const tooltipHeight = 52;
+      const tooltipX = cx > width - margin.right - tooltipWidth - 8 ? -tooltipWidth - 12 : 12;
+      const tooltipY = cy < margin.top + tooltipHeight + 8 ? 12 : -tooltipHeight - 12;
+      const group = svgElement("g", {
+        class: "chart-point-group",
+        tabindex: "0",
+        "aria-label": `DC ${point.dc}%, ${valueName} ${formatChartValue(point.value)} ${valueUnit}`.trim()
+      });
+      const tooltip = svgElement("g", { class: "chart-tooltip", transform: `translate(${cx}, ${cy})` });
+
+      tooltip.append(
+        svgElement("rect", { x: tooltipX, y: tooltipY, width: tooltipWidth, height: tooltipHeight, rx: 6, class: "chart-tooltip-box" }),
+        svgElement("text", { x: tooltipX + 10, y: tooltipY + 20, class: "chart-tooltip-title" }, `DC: ${point.dc}%`),
+        svgElement(
+          "text",
+          { x: tooltipX + 10, y: tooltipY + 38, class: "chart-tooltip-text" },
+          `${valueName}: ${formatChartValue(point.value)} ${valueUnit}`.trim()
+        )
+      );
+      group.append(
+        svgElement("circle", { cx, cy, r: 10, class: "chart-point-hit" }),
+        svgElement("circle", { cx, cy, r: 3.2, class: "chart-point" }),
+        tooltip
+      );
+      children.push(group);
     }
   } else {
     children.push(svgElement("text", { x: width / 2, y: height / 2, class: "chart-empty", "text-anchor": "middle" }, emptyText));
   }
 
   chart.replaceChildren(...children);
+  chart.dataset.renderSignature = renderSignature;
+}
+
+function renderMotorSummary() {
+  motorSummary.replaceChildren(
+    ...motorSummaryItems().map((item) => {
+      const metric = document.createElement("div");
+      const label = document.createElement("div");
+      const value = document.createElement("div");
+      const detail = document.createElement("div");
+
+      metric.className = "motor-metric";
+      label.className = "motor-metric__label";
+      value.className = "motor-metric__value";
+      detail.className = "motor-metric__detail";
+      label.textContent = item.label;
+      value.textContent = item.value;
+      detail.textContent = item.detail;
+      metric.title = `${item.label}: ${item.value}. ${item.detail}`;
+      metric.append(label, value, detail);
+
+      return metric;
+    })
+  );
 }
 
 function renderMotorCharts() {
   renderMotorChart(motorChart, {
     valueKey: "rpm",
     yLabel: "rpm",
+    valueName: "RPM",
+    valueUnit: "rpm",
     lineColor: "#2d83b7",
     symmetric: true,
     emptyText: "No RPM data"
@@ -492,6 +819,8 @@ function renderMotorCharts() {
   renderMotorChart(motorCurrentChart, {
     valueKey: "currentMa",
     yLabel: "mA",
+    valueName: "Current",
+    valueUnit: "mA",
     lineColor: "#d1192e",
     symmetric: false,
     emptyText: "No current data"
@@ -536,6 +865,7 @@ function renderMotorTest() {
     motorTestStatus.textContent = "Ready";
   }
 
+  renderMotorSummary();
   renderMotorCharts();
 }
 
@@ -599,32 +929,15 @@ function liveDisplayForPort(port, description) {
   }
 
   const mode = selectedLiveMode(port);
-  const reading = state.liveValues.get(liveValueKey(port.port, mode));
-  const error = state.liveValues.get(liveValueKey(port.port, "error"));
-
-  if (reading) {
-    return {
-      text: formatLiveValue(reading),
-      live: true,
-      switchable: modes.length > 1,
-      mode
-    };
-  }
-
-  if (error) {
-    return {
-      text: formatLiveValue(error),
-      live: false,
-      switchable: modes.length > 1,
-      mode: "error"
-    };
-  }
+  const value = liveValueForMode(port, mode);
 
   return {
-    text: "...",
-    live: true,
+    text: value.text,
+    label: liveModeLabel(mode),
+    live: value.live,
     switchable: modes.length > 1,
-    mode
+    mode,
+    status: value.status
   };
 }
 
@@ -663,15 +976,30 @@ function renderPortTile(port, rowIndex = 0) {
   detail.className = [
     "port-detail",
     liveDisplay.live ? "port-detail--live" : "",
+    liveDisplay.mode ? "port-mode-display" : "",
     liveDisplay.switchable ? "port-mode-button" : ""
   ].filter(Boolean).join(" ");
   if (liveDisplay.switchable) {
     detail.type = "button";
     detail.dataset.port = port.port;
+    detail.dataset.modeTrigger = port.port;
     detail.title = `Switch ${description.label} mode`;
-    detail.setAttribute("aria-label", `Switch ${description.label} mode. Current value ${liveDisplay.text}.`);
+    detail.setAttribute("aria-haspopup", "menu");
+    detail.setAttribute("aria-expanded", String(state.openModeMenuPort === port.port));
+    detail.setAttribute("aria-label", `Switch ${description.label} mode. ${liveDisplay.label}: ${liveDisplay.text}.`);
   }
-  detail.textContent = liveDisplay.text;
+  if (liveDisplay.mode) {
+    const modeLabel = document.createElement("span");
+    const modeValue = document.createElement("span");
+
+    modeLabel.className = "port-mode-label";
+    modeLabel.textContent = `${liveDisplay.label}:`;
+    modeValue.className = "port-mode-value";
+    modeValue.textContent = liveDisplay.text;
+    detail.append(modeLabel, modeValue);
+  } else {
+    detail.textContent = liveDisplay.text;
+  }
   content.append(device, detail);
   element.append(icon, content);
   return element;
@@ -726,17 +1054,156 @@ function syncLiveModesForPorts() {
   }
 }
 
-function cyclePortMode(portName) {
+function portByName(portName) {
+  return state.ports.find((item) => item.port === portName);
+}
+
+function closeModeMenu(shouldRender = true) {
+  if (!state.openModeMenuPort) {
+    portModeMenu.hidden = true;
+    return;
+  }
+
+  state.openModeMenuPort = "";
+  portModeMenu.hidden = true;
+  portModeMenu.replaceChildren();
+  portModeMenu.dataset.menuSignature = "";
+  portModeMenu.dataset.port = "";
+
+  if (shouldRender) {
+    renderHub();
+  }
+}
+
+function updateModeMenuValues(port, modes) {
+  for (const mode of modes) {
+    const valueNode = portModeMenu.querySelector(`[data-mode-value="${mode}"]`);
+
+    if (valueNode) {
+      valueNode.textContent = liveValueForMode(port, mode).text;
+    }
+  }
+}
+
+function positionModeMenu(portName) {
+  const trigger = document.querySelector(`[data-mode-trigger="${portName}"]`);
+
+  if (!trigger || portModeMenu.hidden) {
+    portModeMenu.hidden = true;
+    return;
+  }
+
+  const container = portModeMenu.offsetParent || dashboardStage;
+  const containerRect = container.getBoundingClientRect();
+  const triggerRect = trigger.getBoundingClientRect();
+  const maxWidth = Math.max(96, containerRect.width - 24);
+  const menuWidth = Math.min(220, maxWidth);
+
+  portModeMenu.style.width = `${menuWidth}px`;
+
+  const menuRect = portModeMenu.getBoundingClientRect();
+  const minLeft = 12;
+  const maxLeft = Math.max(minLeft, containerRect.width - menuWidth - 12);
+  const minTop = 12;
+  const maxTop = Math.max(minTop, containerRect.height - menuRect.height - 12);
+  let left = triggerRect.left - containerRect.left;
+  let top = triggerRect.bottom - containerRect.top + 8;
+
+  if (triggerRect.left > containerRect.left + containerRect.width / 2) {
+    left = triggerRect.right - containerRect.left - menuWidth;
+  }
+
+  if (top > maxTop) {
+    top = triggerRect.top - containerRect.top - menuRect.height - 8;
+  }
+
+  portModeMenu.style.left = `${Math.max(minLeft, Math.min(maxLeft, left))}px`;
+  portModeMenu.style.top = `${Math.max(minTop, Math.min(maxTop, top))}px`;
+}
+
+function renderModeMenu() {
+  const portName = state.openModeMenuPort;
+
+  if (!portName) {
+    portModeMenu.hidden = true;
+    return;
+  }
+
+  const port = portByName(portName);
+  const modes = port ? liveModesForPort(port) : [];
+
+  if (!port || modes.length < 2) {
+    closeModeMenu(false);
+    return;
+  }
+
+  const selected = selectedLiveMode(port);
+  const signature = `${portName}:${selected}:${modes.join("|")}`;
+
+  portModeMenu.hidden = false;
+  portModeMenu.dataset.port = portName;
+  portModeMenu.setAttribute("role", "menu");
+  portModeMenu.setAttribute("aria-label", `Display mode for port ${portName}`);
+
+  if (portModeMenu.dataset.menuSignature !== signature) {
+    portModeMenu.replaceChildren(
+      ...modes.map((mode) => {
+        const item = document.createElement("button");
+        const check = document.createElement("span");
+        const label = document.createElement("span");
+        const value = document.createElement("span");
+        const isSelected = mode === selected;
+
+        item.type = "button";
+        item.className = "port-mode-menu__item";
+        item.dataset.port = portName;
+        item.dataset.mode = mode;
+        item.setAttribute("role", "menuitemradio");
+        item.setAttribute("aria-checked", String(isSelected));
+        check.className = "port-mode-menu__check";
+        check.textContent = isSelected ? "\u2713" : "";
+        label.className = "port-mode-menu__label";
+        label.textContent = liveModeLabel(mode);
+        value.className = "port-mode-menu__value";
+        value.dataset.modeValue = mode;
+        value.textContent = liveValueForMode(port, mode).text;
+        item.append(check, label, value);
+
+        return item;
+      })
+    );
+    portModeMenu.dataset.menuSignature = signature;
+  } else {
+    updateModeMenuValues(port, modes);
+  }
+
+  positionModeMenu(portName);
+}
+
+function selectPortMode(portName, mode) {
+  const port = portByName(portName);
+  const modes = port ? liveModesForPort(port) : [];
+
+  if (!modes.includes(mode)) {
+    closeModeMenu();
+    return;
+  }
+
+  state.selectedModeByPort.set(portName, mode);
+  closeModeMenu(false);
+  renderHub();
+}
+
+function toggleModeMenu(portName) {
   const port = state.ports.find((item) => item.port === portName);
   const modes = port ? liveModesForPort(port) : [];
 
   if (modes.length < 2) {
+    closeModeMenu();
     return;
   }
 
-  const current = selectedLiveMode(port);
-  const next = modes[(modes.indexOf(current) + 1) % modes.length];
-  state.selectedModeByPort.set(portName, next);
+  state.openModeMenuPort = state.openModeMenuPort === portName ? "" : portName;
   renderHub();
 }
 
@@ -789,6 +1256,7 @@ function renderHub() {
   hubThumbImage.alt = "";
   renderPorts();
   renderMotorTest();
+  renderModeMenu();
 }
 
 function resetUiAfterDisconnect() {
@@ -805,7 +1273,9 @@ function resetUiAfterDisconnect() {
   };
   state.liveValues.clear();
   state.selectedModeByPort.clear();
+  state.openModeMenuPort = "";
   state.motorTest.data = [];
+  state.motorTest.metrics = null;
   state.motorTest.selectedPort = "";
   scanStamp.textContent = "Not scanned";
   setConnectionState("Disconnected", "idle");
@@ -816,6 +1286,7 @@ function resetUiAfterDisconnect() {
 async function refreshPorts() {
   setBusy(true, "Scanning");
   setMessage("");
+  closeModeMenu(false);
   state.imu = {
     voltage: null,
     current: null,
@@ -856,13 +1327,15 @@ async function runMotorTest() {
   state.motorTest.selectedPort = port;
   state.motorTest.step = step;
   state.motorTest.data = [];
+  state.motorTest.metrics = null;
   setBusy(true, "Motor test");
   setMessage("");
   renderMotorTest();
 
   try {
-    const points = await client.runMotorDcSweep({ port, step });
-    state.motorTest.data = points;
+    const result = await client.runMotorDcSweep({ port, step });
+    state.motorTest.data = result.points;
+    state.motorTest.metrics = result.metrics;
     setConnectionState("Connected", "ready");
     renderMotorTest();
     await client.startLiveMonitor(state.ports).catch(() => {});
@@ -880,6 +1353,7 @@ async function runMotorTest() {
 connectBtn.addEventListener("click", async () => {
   setBusy(true, "Connecting");
   setMessage("");
+  closeModeMenu(false);
 
   try {
     const { info, capabilities } = await client.connect();
@@ -941,13 +1415,49 @@ downloadMotorChartBtn.addEventListener("click", () => {
 });
 
 hubDashboard.addEventListener("click", (event) => {
-  const button = event.target.closest(".port-mode-button");
+  const target = event.target instanceof Element ? event.target : null;
+  const button = target?.closest(".port-mode-button");
 
   if (!button) {
     return;
   }
 
-  cyclePortMode(button.dataset.port);
+  toggleModeMenu(button.dataset.port);
+});
+
+portModeMenu.addEventListener("click", (event) => {
+  const target = event.target instanceof Element ? event.target : null;
+  const item = target?.closest(".port-mode-menu__item");
+
+  if (!item) {
+    return;
+  }
+
+  selectPortMode(item.dataset.port, item.dataset.mode);
+});
+
+document.addEventListener("pointerdown", (event) => {
+  if (!state.openModeMenuPort) {
+    return;
+  }
+
+  const target = event.target instanceof Element ? event.target : null;
+
+  if (target?.closest(".port-mode-menu") || target?.closest(".port-mode-button")) {
+    return;
+  }
+
+  closeModeMenu();
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && state.openModeMenuPort) {
+    closeModeMenu();
+  }
+});
+
+window.addEventListener("resize", () => {
+  renderModeMenu();
 });
 
 client.addEventListener("live", (event) => {
