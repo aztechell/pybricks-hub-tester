@@ -171,14 +171,20 @@ function makePythonTuple(items) {
   return `(${items.join(",")})`;
 }
 
-function makeLiveMonitorProgram(nonce, ports, hubClass) {
+function makeLiveMonitorProgram(nonce, ports, hubClass, selectedModesByPort = {}) {
   const livePorts = ports.filter((port) => liveModesForDeviceId(port.deviceId).length);
 
   if (!livePorts.length && !hubClass) {
     return null;
   }
 
-  const portRows = makePythonTuple(livePorts.map((port) => `("${port.port}",${port.deviceId})`));
+  const portRows = makePythonTuple(
+    livePorts.map((port) => {
+      const selectedMode = selectedModesByPort[port.port] || "";
+
+      return `("${port.port}",${port.deviceId},${JSON.stringify(selectedMode)})`;
+    })
+  );
   const motorIds = makePythonTuple(MOTOR_DEVICE_IDS.map(String));
   const importNames = new Set();
 
@@ -223,7 +229,7 @@ try:
     ${hubImport}
     from pybricks.tools import wait
 except Exception as e:
-    for n,i in R:
+    for n,i,sm in R:
         emit(n,"error",type(e).__name__)
     im("error",type(e).__name__)
     flush()
@@ -241,10 +247,10 @@ def make(i,p):
     if i==37:return ColorDistanceSensor(p)
     return None
 D=[]
-for n,i in R:
+for n,i,sm in R:
     try:
         d=make(i,getattr(Port,n))
-        if d:D.append((n,i,d))
+        if d:D.append((n,i,sm,d))
     except Exception as e:
         emit(n,"error",type(e).__name__)
 flush()
@@ -266,7 +272,7 @@ while True:
             except Exception as e:
                 im("error",type(e).__name__)
                 IR=False
-    for n,i,d in D:
+    for n,i,sm,d in D:
         try:
             if i in M:
                 emit(n,"angle",d.angle());emit(n,"speed",d.speed())
@@ -275,14 +281,16 @@ while True:
             elif i==62:
                 emit(n,"distance",d.distance()//10)
             elif i in (37,61):
-                try:emit(n,"reflection",d.reflection())
-                except Exception:pass
-                try:emit(n,"ambient",d.ambient())
-                except Exception:pass
-                try:emit(n,"hsv",hs(d.hsv()))
-                except Exception:pass
-                try:emit(n,"color",str(d.color()).split(".")[-1])
-                except Exception as e:emit(n,"error",type(e).__name__)
+                if sm=="ambient":
+                    try:emit(n,"ambient",d.ambient())
+                    except Exception as e:emit(n,"error",type(e).__name__)
+                else:
+                    try:emit(n,"reflection",d.reflection())
+                    except Exception:pass
+                    try:emit(n,"hsv",hs(d.hsv()))
+                    except Exception:pass
+                    try:emit(n,"color",str(d.color()).split(".")[-1])
+                    except Exception as e:emit(n,"error",type(e).__name__)
         except Exception as e:
             emit(n,"error",type(e).__name__)
     flush()
@@ -462,7 +470,7 @@ export class PybricksHubClient extends EventTarget {
     this.#resetConnection();
   }
 
-  async startLiveMonitor(ports) {
+  async startLiveMonitor(ports, options = {}) {
     if (!this.connected) {
       throw new Error("Hub is not connected.");
     }
@@ -472,7 +480,12 @@ export class PybricksHubClient extends EventTarget {
     await this.stopLiveMonitor().catch(() => {});
 
     const nonce = makeNonce();
-    const code = makeLiveMonitorProgram(nonce, supportedPorts, this.info?.model?.hubClass);
+    const code = makeLiveMonitorProgram(
+      nonce,
+      supportedPorts,
+      this.info?.model?.hubClass,
+      options.selectedModesByPort || {}
+    );
 
     if (!code) {
       return false;

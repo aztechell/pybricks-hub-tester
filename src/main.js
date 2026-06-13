@@ -57,6 +57,7 @@ const HUB_IMAGE_BY_PRODUCT_ID = Object.freeze({
 });
 
 const SENSOR_DEVICE_IDS = new Set([8, 34, 35, 37, 61, 62, 63, 64]);
+const COLOR_SENSOR_DEVICE_IDS = new Set([37, 61]);
 const LIVE_MODE_LABELS = Object.freeze({
   angle: "Angle",
   speed: "Speed",
@@ -100,6 +101,7 @@ const state = {
 };
 
 let renderQueued = false;
+let liveMonitorRestartPromise = Promise.resolve();
 
 function setActiveTab(tabName) {
   if (tabName !== "dashboard") {
@@ -1054,6 +1056,67 @@ function syncLiveModesForPorts() {
   }
 }
 
+function liveMonitorSelectedModesByPort() {
+  const selectedModesByPort = {};
+
+  for (const port of state.ports) {
+    const selected = selectedLiveMode(port);
+
+    if (selected) {
+      selectedModesByPort[port.port] = selected;
+    }
+  }
+
+  return selectedModesByPort;
+}
+
+function liveMonitorOptions() {
+  return {
+    selectedModesByPort: liveMonitorSelectedModesByPort()
+  };
+}
+
+function clearLiveValuesForPort(portName) {
+  for (const key of [...state.liveValues.keys()]) {
+    if (key.startsWith(`${portName}:`)) {
+      state.liveValues.delete(key);
+    }
+  }
+}
+
+function shouldRestartLiveMonitorForModeChange(port, previousMode, nextMode) {
+  return (
+    state.connected &&
+    !state.busy &&
+    COLOR_SENSOR_DEVICE_IDS.has(port.deviceId) &&
+    previousMode !== nextMode &&
+    (previousMode === "ambient" || nextMode === "ambient")
+  );
+}
+
+function restartLiveMonitorForSelectedModes() {
+  if (!state.connected || state.busy) {
+    return Promise.resolve(false);
+  }
+
+  liveMonitorRestartPromise = liveMonitorRestartPromise
+    .catch(() => {})
+    .then(async () => {
+      if (!state.connected || state.busy) {
+        return false;
+      }
+
+      await client.startLiveMonitor(state.ports, liveMonitorOptions());
+      return true;
+    })
+    .catch((error) => {
+      setMessage(error.message || String(error), true);
+      return false;
+    });
+
+  return liveMonitorRestartPromise;
+}
+
 function portByName(portName) {
   return state.ports.find((item) => item.port === portName);
 }
@@ -1189,9 +1252,21 @@ function selectPortMode(portName, mode) {
     return;
   }
 
+  const previousMode = selectedLiveMode(port);
+  const shouldRestart = shouldRestartLiveMonitorForModeChange(port, previousMode, mode);
+
   state.selectedModeByPort.set(portName, mode);
+
+  if (shouldRestart) {
+    clearLiveValuesForPort(portName);
+  }
+
   closeModeMenu(false);
   renderHub();
+
+  if (shouldRestart) {
+    restartLiveMonitorForSelectedModes();
+  }
 }
 
 function toggleModeMenu(portName) {
@@ -1305,7 +1380,7 @@ async function refreshPorts() {
     scanStamp.textContent = `Scanned ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
     setConnectionState("Connected", "ready");
     renderHub();
-    await client.startLiveMonitor(state.ports);
+    await client.startLiveMonitor(state.ports, liveMonitorOptions());
   } catch (error) {
     setConnectionState("Connected", "ready");
     setMessage(error.message || String(error), true);
@@ -1338,11 +1413,11 @@ async function runMotorTest() {
     state.motorTest.metrics = result.metrics;
     setConnectionState("Connected", "ready");
     renderMotorTest();
-    await client.startLiveMonitor(state.ports).catch(() => {});
+    await client.startLiveMonitor(state.ports, liveMonitorOptions()).catch(() => {});
   } catch (error) {
     setConnectionState("Connected", "ready");
     setMessage(error.message || String(error), true);
-    await client.startLiveMonitor(state.ports).catch(() => {});
+    await client.startLiveMonitor(state.ports, liveMonitorOptions()).catch(() => {});
   } finally {
     state.motorTest.running = false;
     setBusy(false);
