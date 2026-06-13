@@ -1,11 +1,11 @@
-import { PybricksHubClient } from "./pybricks.js";
+import { PybricksHubClient } from "./pybricks.js?v=20260613-1";
 import {
   estimateBatteryPercentFromVoltage,
   isMotorDeviceId,
   liveModesForDeviceId,
   makeInitialPorts,
   PORT_NAMES
-} from "./parser.js";
+} from "./parser.js?v=20260613-1";
 
 const connectBtn = document.querySelector("#connectBtn");
 const refreshBtn = document.querySelector("#refreshBtn");
@@ -39,6 +39,10 @@ const motorStepSelect = document.querySelector("#motorStepSelect");
 const runMotorTestBtn = document.querySelector("#runMotorTestBtn");
 const downloadMotorChartBtn = document.querySelector("#downloadMotorChartBtn");
 const motorTestStatus = document.querySelector("#motorTestStatus");
+const motorProgress = document.querySelector("#motorProgress");
+const motorProgressPhase = document.querySelector("#motorProgressPhase");
+const motorProgressPercent = document.querySelector("#motorProgressPercent");
+const motorProgressFill = document.querySelector("#motorProgressFill");
 const motorSummary = document.querySelector("#motorSummary");
 const motorChart = document.querySelector("#motorChart");
 const motorCurrentChart = document.querySelector("#motorCurrentChart");
@@ -72,10 +76,16 @@ const LIVE_MODE_LABELS = Object.freeze({
   error: "Error"
 });
 const MOTOR_START_RPM_THRESHOLD = 5;
+const MOTOR_SWEEP_SAMPLE_INTERVAL_MS = 260;
+const WEB_BLUETOOTH_UNAVAILABLE_MESSAGE =
+  "Web Bluetooth is unavailable. Use Chrome or Edge over HTTPS or localhost.";
+const BLUETOOTH_ADAPTER_UNAVAILABLE_MESSAGE =
+  "Bluetooth adapter is off or unavailable. Turn on Bluetooth and reload.";
 
 const state = {
   connected: false,
   busy: false,
+  bluetoothAvailable: true,
   hub: null,
   capabilities: null,
   ports: makeInitialPorts(),
@@ -94,7 +104,14 @@ const state = {
     metrics: null,
     running: false,
     selectedPort: "",
-    step: 10
+    step: 10,
+    sampleIntervalMs: MOTOR_SWEEP_SAMPLE_INTERVAL_MS,
+    progress: {
+      phase: "idle",
+      percent: 0,
+      pointsDone: 0,
+      pointsTotal: 0
+    }
   },
   message: "",
   error: ""
@@ -126,7 +143,7 @@ function setConnectionState(label, variant = "idle") {
 
 function setBusy(isBusy, label = "") {
   state.busy = isBusy;
-  connectBtn.disabled = isBusy || state.connected;
+  connectBtn.disabled = isBusy || state.connected || !state.bluetoothAvailable;
   refreshBtn.disabled = isBusy || !state.connected;
   disconnectBtn.disabled = isBusy || !state.connected;
 
@@ -286,7 +303,7 @@ function hsvToRgb(value) {
   return [r, g, b].map((channel) => Math.round((channel + m) * 255));
 }
 
-function formatLiveValue(reading) {
+function formatLiveValue(reading, port = null) {
   const value = String(reading.value ?? "").trim();
 
   if (reading.status === "error") {
@@ -306,6 +323,10 @@ function formatLiveValue(reading) {
   }
 
   if (reading.mode === "distance") {
+    if (port?.deviceId === 37) {
+      return `${value}%`;
+    }
+
     return `${value} cm`;
   }
 
@@ -338,7 +359,7 @@ function liveValueForMode(port, mode) {
 
     if (hsvReading) {
       return {
-        text: formatLiveValue({ ...hsvReading, mode: "rgb" }),
+        text: formatLiveValue({ ...hsvReading, mode: "rgb" }, port),
         live: true,
         status: "value"
       };
@@ -349,7 +370,7 @@ function liveValueForMode(port, mode) {
 
   if (reading) {
     return {
-      text: formatLiveValue(reading),
+      text: formatLiveValue(reading, port),
       live: true,
       status: "value"
     };
@@ -359,7 +380,7 @@ function liveValueForMode(port, mode) {
 
   if (error) {
     return {
-      text: formatLiveValue(error),
+      text: formatLiveValue(error, port),
       live: false,
       status: "error"
     };
@@ -579,6 +600,39 @@ function motorMaxRpm(points, sign) {
   return matching.reduce((best, point) => (Math.abs(point.value) > Math.abs(best.value) ? point : best)).value;
 }
 
+function motorPeakAcceleration(points, sign, sampleIntervalMs) {
+  const seconds = Math.max(0.001, (Number(sampleIntervalMs) || MOTOR_SWEEP_SAMPLE_INTERVAL_MS) / 1000);
+  let best = null;
+
+  for (let index = 1; index < points.length; index += 1) {
+    const previous = points[index - 1];
+    const current = points[index];
+
+    if (!Number.isFinite(previous?.rpm) || !Number.isFinite(current?.rpm)) {
+      continue;
+    }
+
+    const isForwardRamp = sign > 0 && previous.dc >= 0 && current.dc > previous.dc;
+    const isReverseRamp = sign < 0 && previous.dc <= 0 && current.dc < previous.dc;
+
+    if (!isForwardRamp && !isReverseRamp) {
+      continue;
+    }
+
+    const acceleration = (current.rpm - previous.rpm) / seconds;
+
+    if (!Number.isFinite(acceleration)) {
+      continue;
+    }
+
+    if (best === null || Math.abs(acceleration) > Math.abs(best)) {
+      best = acceleration;
+    }
+  }
+
+  return best;
+}
+
 function formatDualPercent(positive, negative) {
   const positiveText = Number.isFinite(positive) ? signedNumber(positive, "%") : "-";
   const negativeText = Number.isFinite(negative) ? signedNumber(negative, "%") : "-";
@@ -589,6 +643,13 @@ function formatDualPercent(positive, negative) {
 function formatDualRpm(positive, negative) {
   const positiveText = Number.isFinite(positive) ? `${signedNumber(positive)} rpm` : "-";
   const negativeText = Number.isFinite(negative) ? `${signedNumber(negative)} rpm` : "-";
+
+  return `${positiveText} / ${negativeText}`;
+}
+
+function formatDualAcceleration(positive, negative) {
+  const positiveText = Number.isFinite(positive) ? `${signedNumber(positive)} rpm/s` : "-";
+  const negativeText = Number.isFinite(negative) ? `${signedNumber(negative)} rpm/s` : "-";
 
   return `${positiveText} / ${negativeText}`;
 }
@@ -630,6 +691,8 @@ function motorSummaryItems() {
   const negativeStartup = motorStartupDuty(points, -1);
   const positiveMaxRpm = motorMaxRpm(points, 1);
   const negativeMaxRpm = motorMaxRpm(points, -1);
+  const positivePeakAcceleration = motorPeakAcceleration(state.motorTest.data, 1, state.motorTest.sampleIntervalMs);
+  const negativePeakAcceleration = motorPeakAcceleration(state.motorTest.data, -1, state.motorTest.sampleIntervalMs);
   const backlash = formatBacklash(state.motorTest.metrics?.backlash);
 
   return [
@@ -642,6 +705,11 @@ function motorSummaryItems() {
       label: "Max RPM",
       value: formatDualRpm(positiveMaxRpm, negativeMaxRpm),
       detail: "forward / reverse"
+    },
+    {
+      label: "Peak accel",
+      value: formatDualAcceleration(positivePeakAcceleration, negativePeakAcceleration),
+      detail: `sample ${state.motorTest.sampleIntervalMs} ms`
     },
     {
       label: "Backlash",
@@ -829,6 +897,45 @@ function renderMotorCharts() {
   });
 }
 
+function progressPhaseLabel(phase) {
+  return {
+    idle: "Idle",
+    preparing: "Preparing",
+    sweeping: "Sweeping",
+    backlash: "Backlash",
+    complete: "Complete",
+    "timed-out": "Timed out",
+    error: "Error"
+  }[phase] ?? "Running";
+}
+
+function setMotorProgress(progress) {
+  state.motorTest.progress = {
+    ...state.motorTest.progress,
+    ...progress,
+    percent: Math.max(0, Math.min(100, Math.round(Number(progress.percent) || 0)))
+  };
+}
+
+function renderMotorProgress() {
+  const progress = state.motorTest.progress;
+  const isVisible = state.motorTest.running || progress.phase !== "idle";
+
+  motorProgress.hidden = !isVisible;
+
+  if (!isVisible) {
+    return;
+  }
+
+  motorProgressPhase.textContent = progressPhaseLabel(progress.phase);
+  motorProgressPercent.textContent = `${progress.percent}%`;
+  motorProgressFill.style.width = `${progress.percent}%`;
+  motorProgress.setAttribute("aria-valuemin", "0");
+  motorProgress.setAttribute("aria-valuemax", "100");
+  motorProgress.setAttribute("aria-valuenow", String(progress.percent));
+  motorProgress.setAttribute("role", "progressbar");
+}
+
 function renderMotorTest() {
   const motors = motorPorts();
   const previous = state.motorTest.selectedPort || motorPortSelect.value;
@@ -856,9 +963,13 @@ function renderMotorTest() {
   downloadMotorChartBtn.disabled = !state.motorTest.data.length;
 
   if (state.motorTest.running) {
-    motorTestStatus.textContent = "Running";
+    motorTestStatus.textContent = `${progressPhaseLabel(state.motorTest.progress.phase)} ${state.motorTest.progress.percent}%`;
   } else if (!state.connected) {
     motorTestStatus.textContent = "Disconnected";
+  } else if (state.motorTest.progress.phase === "timed-out") {
+    motorTestStatus.textContent = "Timed out";
+  } else if (state.motorTest.progress.phase === "error") {
+    motorTestStatus.textContent = "Error";
   } else if (!motors.length) {
     motorTestStatus.textContent = "No motor selected";
   } else if (state.motorTest.data.length) {
@@ -867,6 +978,7 @@ function renderMotorTest() {
     motorTestStatus.textContent = "Ready";
   }
 
+  renderMotorProgress();
   renderMotorSummary();
   renderMotorCharts();
 }
@@ -1352,6 +1464,13 @@ function resetUiAfterDisconnect() {
   state.motorTest.data = [];
   state.motorTest.metrics = null;
   state.motorTest.selectedPort = "";
+  state.motorTest.sampleIntervalMs = MOTOR_SWEEP_SAMPLE_INTERVAL_MS;
+  setMotorProgress({
+    phase: "idle",
+    percent: 0,
+    pointsDone: 0,
+    pointsTotal: 0
+  });
   scanStamp.textContent = "Not scanned";
   setConnectionState("Disconnected", "idle");
   setBusy(false);
@@ -1403,6 +1522,13 @@ async function runMotorTest() {
   state.motorTest.step = step;
   state.motorTest.data = [];
   state.motorTest.metrics = null;
+  state.motorTest.sampleIntervalMs = MOTOR_SWEEP_SAMPLE_INTERVAL_MS;
+  setMotorProgress({
+    phase: "preparing",
+    percent: 0,
+    pointsDone: 0,
+    pointsTotal: 0
+  });
   setBusy(true, "Motor test");
   setMessage("");
   renderMotorTest();
@@ -1411,10 +1537,29 @@ async function runMotorTest() {
     const result = await client.runMotorDcSweep({ port, step });
     state.motorTest.data = result.points;
     state.motorTest.metrics = result.metrics;
+    state.motorTest.sampleIntervalMs = result.sampleIntervalMs || MOTOR_SWEEP_SAMPLE_INTERVAL_MS;
+    setMotorProgress({
+      phase: "complete",
+      percent: 100,
+      pointsDone: state.motorTest.progress.pointsDone,
+      pointsTotal: state.motorTest.progress.pointsTotal
+    });
     setConnectionState("Connected", "ready");
     renderMotorTest();
     await client.startLiveMonitor(state.ports, liveMonitorOptions()).catch(() => {});
   } catch (error) {
+    if (error.partialResult?.points?.length) {
+      state.motorTest.data = error.partialResult.points;
+      state.motorTest.metrics = error.partialResult.metrics;
+      state.motorTest.sampleIntervalMs = error.partialResult.sampleIntervalMs || MOTOR_SWEEP_SAMPLE_INTERVAL_MS;
+    }
+
+    setMotorProgress(error.progress || {
+      phase: error.message?.includes("timed out") ? "timed-out" : "error",
+      percent: state.motorTest.progress.percent,
+      pointsDone: state.motorTest.progress.pointsDone,
+      pointsTotal: state.motorTest.progress.pointsTotal
+    });
     setConnectionState("Connected", "ready");
     setMessage(error.message || String(error), true);
     await client.startLiveMonitor(state.ports, liveMonitorOptions()).catch(() => {});
@@ -1570,16 +1715,55 @@ client.addEventListener("live", (event) => {
   queueRenderHub();
 });
 
+client.addEventListener("motor-progress", (event) => {
+  setMotorProgress(event.detail);
+  renderMotorTest();
+});
+
 client.addEventListener("disconnected", () => {
   resetUiAfterDisconnect();
   setMessage("Hub disconnected.");
 });
 
-if (!("bluetooth" in navigator)) {
-  setConnectionState("Unavailable", "error");
-  connectBtn.disabled = true;
-  setMessage("Web Bluetooth is not available in this browser.", true);
+async function updateBluetoothAvailability() {
+  if (!("bluetooth" in navigator)) {
+    state.bluetoothAvailable = false;
+    setConnectionState("Unavailable", "error");
+    setMessage(WEB_BLUETOOTH_UNAVAILABLE_MESSAGE, true);
+    setBusy(state.busy);
+    return;
+  }
+
+  if (!("getAvailability" in navigator.bluetooth)) {
+    state.bluetoothAvailable = true;
+    setBusy(state.busy);
+    return;
+  }
+
+  try {
+    const isAvailable = await navigator.bluetooth.getAvailability();
+    state.bluetoothAvailable = isAvailable;
+
+    if (!isAvailable) {
+      setConnectionState("Unavailable", "error");
+      setMessage(BLUETOOTH_ADAPTER_UNAVAILABLE_MESSAGE, true);
+    } else if (!state.connected && state.error === BLUETOOTH_ADAPTER_UNAVAILABLE_MESSAGE) {
+      setConnectionState("Disconnected", "idle");
+      setMessage("");
+    }
+  } catch {
+    state.bluetoothAvailable = true;
+  }
+
+  setBusy(state.busy);
+}
+
+if ("bluetooth" in navigator && "addEventListener" in navigator.bluetooth) {
+  navigator.bluetooth.addEventListener("availabilitychanged", () => {
+    updateBluetoothAvailability();
+  });
 }
 
 setActiveTab("dashboard");
 renderHub();
+updateBluetoothAvailability();

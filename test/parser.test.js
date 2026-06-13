@@ -3,9 +3,11 @@ import assert from "node:assert/strict";
 import {
   deviceNameForId,
   estimateBatteryPercentFromVoltage,
+  liveModesForDeviceId,
   makeInitialPorts,
   parseHubCapabilities,
   parseLiveOutput,
+  parseMotorSweepProgress,
   parseMotorSweepOutput,
   parsePnpId,
   parseScanOutput,
@@ -170,6 +172,7 @@ describe("parser", () => {
       "L:live1:A:force:0.5",
       "L:live1:B:speed:12",
       "L:live1:C:color:BLUE",
+      "L:live1:C:distance:70",
       "L:live1:C:hsv:240,80,70",
       "L:live1:C:ambient:14",
       "L:live1:C:reflection:55"
@@ -204,6 +207,13 @@ describe("parser", () => {
         mode: "speed",
         status: "value",
         value: "12",
+        error: null
+      },
+      {
+        port: "C",
+        mode: "distance",
+        status: "value",
+        value: "70",
         error: null
       },
       {
@@ -371,5 +381,54 @@ describe("parser", () => {
         error: "OSError"
       }
     });
+  });
+
+  it("exposes color distance sensor distance mode", () => {
+    assert.deepEqual(liveModesForDeviceId(37), ["reflection", "distance", "ambient", "hsv", "rgb", "color"]);
+  });
+
+  it("parses motor sweep progress", () => {
+    assert.deepEqual(parseMotorSweepProgress("MT:m1:0:0\nMT:m1:10:60", "m1", 4), {
+      phase: "sweeping",
+      percent: 45,
+      pointsDone: 2,
+      pointsTotal: 4,
+      complete: false,
+      error: null,
+      partialResult: {
+        complete: false,
+        error: null,
+        points: [
+          {
+            dc: 0,
+            speedDegPerSecond: 0,
+            rpm: 0
+          },
+          {
+            dc: 10,
+            speedDegPerSecond: 60,
+            rpm: 10
+          }
+        ],
+        metrics: {
+          backlash: {
+            positiveDeg: null,
+            negativeDeg: null,
+            status: "not_run",
+            error: null
+          }
+        }
+      }
+    });
+    assert.equal(parseMotorSweepProgress("MT:m1:0:0\nMT:m1:10:60\nMB:m1:N:N", "m1", 4).phase, "backlash");
+    assert.equal(parseMotorSweepProgress("MT:m1:0:0\nMX:m1", "m1", 4).percent, 100);
+  });
+
+  it("does not treat partial motor sweep output as complete", () => {
+    const output = "MT:m1:0:0\nMT:m1:10:60";
+    const result = parseMotorSweepOutput(output, "m1");
+
+    assert.equal(result.complete, false);
+    assert.equal(parseMotorSweepProgress(output, "m1", 2).phase, "backlash");
   });
 });

@@ -4,6 +4,7 @@ import {
   liveModesForDeviceId,
   parseHubCapabilities,
   parseLiveOutput,
+  parseMotorSweepProgress,
   parseMotorSweepOutput,
   parsePnpId,
   parseScanOutput,
@@ -11,7 +12,7 @@ import {
   resolveHubModel,
   supportsWriteStdin,
   usesBuiltinRepl
-} from "./parser.js";
+} from "./parser.js?v=20260613-1";
 
 const PYBRICKS_SERVICE_UUID = "c5f50001-8280-46da-89f4-6d8051e4aeef";
 const PYBRICKS_COMMAND_EVENT_UUID = "c5f50002-8280-46da-89f4-6d8051e4aeef";
@@ -67,7 +68,9 @@ const LIVE_MONITOR_WRITE = Object.freeze({
   allowPartialOnTimeout: false
 });
 
-const LIVE_MONITOR_INTERVAL_MS = 350;
+const LIVE_MONITOR_INTERVAL_MS = 200;
+const LIVE_CURRENT_INTERVAL_TICKS = 5;
+const LIVE_VOLTAGE_INTERVAL_TICKS = 25;
 const MOTOR_SWEEP_SETTLE_MS = 260;
 const MOTOR_BACKLASH_TAKEUP_MS = 360;
 const MOTOR_BACKLASH_SAMPLE_MS = 20;
@@ -209,8 +212,10 @@ N="${nonce}"
 R=${portRows}
 M=${motorIds}
 H=None
-BR=True
+VR=True
+CR=True
 IR=True
+T=0
 O=[]
 def flush():
     global O
@@ -257,12 +262,16 @@ flush()
 while True:
     O=[]
     if H:
-        if BR:
+        if VR and T%${LIVE_VOLTAGE_INTERVAL_TICKS}==0:
             try:
                 im("voltage",H.battery.voltage())
+            except Exception:
+                VR=False
+        if CR and T%${LIVE_CURRENT_INTERVAL_TICKS}==0:
+            try:
                 im("current",H.battery.current())
             except Exception:
-                BR=False
+                CR=False
         if IR:
             try:
                 p,r=H.imu.tilt()
@@ -285,6 +294,9 @@ while True:
                     try:emit(n,"ambient",d.ambient())
                     except Exception as e:emit(n,"error",type(e).__name__)
                 else:
+                    if i==37:
+                        try:emit(n,"distance",d.distance())
+                        except Exception:pass
                     try:emit(n,"reflection",d.reflection())
                     except Exception:pass
                     try:emit(n,"hsv",hs(d.hsv()))
@@ -294,6 +306,7 @@ while True:
         except Exception as e:
             emit(n,"error",type(e).__name__)
     flush()
+    T+=1
     wait(${LIVE_MONITOR_INTERVAL_MS})
 `.trim();
 }
@@ -390,6 +403,8 @@ export class PybricksHubClient extends EventTarget {
     this.liveNonce = null;
     this.liveBuffer = "";
     this.liveRunning = false;
+    this.operationQueue = Promise.resolve();
+    this.operationDepth = 0;
   }
 
   get connected() {
@@ -398,7 +413,7 @@ export class PybricksHubClient extends EventTarget {
 
   async connect() {
     if (!("bluetooth" in navigator)) {
-      throw new Error("Web Bluetooth is not available in this browser.");
+      throw new Error("Web Bluetooth is unavailable. Use Chrome or Edge over HTTPS or localhost.");
     }
 
     this.device = await navigator.bluetooth.requestDevice({
@@ -453,7 +468,11 @@ export class PybricksHubClient extends EventTarget {
   }
 
   async disconnect() {
-    await this.stopLiveMonitor().catch(() => {});
+    return this.#enqueueOperation(() => this.#disconnect());
+  }
+
+  async #disconnect() {
+    await this.#stopLiveMonitor().catch(() => {});
 
     if (this.commandEventCharacteristic) {
       try {
@@ -471,13 +490,17 @@ export class PybricksHubClient extends EventTarget {
   }
 
   async startLiveMonitor(ports, options = {}) {
+    return this.#enqueueOperation(() => this.#startLiveMonitor(ports, options));
+  }
+
+  async #startLiveMonitor(ports, options = {}) {
     if (!this.connected) {
       throw new Error("Hub is not connected.");
     }
 
     const supportedPorts = ports.filter((port) => liveModesForDeviceId(port.deviceId).length);
 
-    await this.stopLiveMonitor().catch(() => {});
+    await this.#stopLiveMonitor().catch(() => {});
 
     const nonce = makeNonce();
     const code = makeLiveMonitorProgram(
@@ -523,6 +546,10 @@ export class PybricksHubClient extends EventTarget {
   }
 
   async stopLiveMonitor() {
+    return this.#enqueueOperation(() => this.#stopLiveMonitor());
+  }
+
+  async #stopLiveMonitor() {
     const wasLive = Boolean(this.liveNonce || this.liveRunning);
 
     this.liveNonce = null;
@@ -542,12 +569,16 @@ export class PybricksHubClient extends EventTarget {
   }
 
   async scanPorts() {
+    return this.#enqueueOperation(() => this.#scanPorts());
+  }
+
+  async #scanPorts() {
     if (!this.connected) {
       throw new Error("Hub is not connected.");
     }
 
     if (this.liveNonce || this.liveRunning) {
-      await this.stopLiveMonitor();
+      await this.#stopLiveMonitor();
     }
 
     if (!supportsWriteStdin(this.info?.profileVersion)) {
@@ -652,6 +683,10 @@ export class PybricksHubClient extends EventTarget {
   }
 
   async runMotorDcSweep({ port, step }) {
+    return this.#enqueueOperation(() => this.#runMotorDcSweep({ port, step }));
+  }
+
+  async #runMotorDcSweep({ port, step }) {
     if (!this.connected) {
       throw new Error("Hub is not connected.");
     }
@@ -668,7 +703,7 @@ export class PybricksHubClient extends EventTarget {
       throw new Error("Select a DC step of 1, 5, or 10.");
     }
 
-    await this.stopLiveMonitor().catch(() => {});
+    await this.#stopLiveMonitor().catch(() => {});
 
     const nonce = makeNonce();
     const code = makeMotorSweepProgram(nonce, port, step, this.info?.model?.hubClass);
@@ -681,9 +716,14 @@ export class PybricksHubClient extends EventTarget {
     try {
       await this.#startFreshRepl();
       this.stdout = "";
-      const resultPromise = this.#waitForMotorSweep(nonce, timeoutMs);
+      this.#dispatchMotorProgress("preparing", 2, 0, pointCount);
+      const resultPromise = this.#waitForMotorSweep(nonce, timeoutMs, pointCount);
       await this.writeStdin(command, `send motor sweep (${port}, ${step}%)`, LIVE_MONITOR_WRITE);
-      return await resultPromise;
+      const result = await resultPromise;
+      return {
+        ...result,
+        sampleIntervalMs: MOTOR_SWEEP_SETTLE_MS
+      };
     } finally {
       await this.writeCommand(COMMAND.STOP_USER_PROGRAM, undefined, "stop motor test").catch(() => {});
       this.stdout = "";
@@ -760,6 +800,25 @@ export class PybricksHubClient extends EventTarget {
     }
 
     throw new Error(`${context}: ${lastError?.message || String(lastError)}`);
+  }
+
+  #enqueueOperation(operation) {
+    if (this.operationDepth > 0) {
+      return operation();
+    }
+
+    const run = async () => {
+      this.operationDepth += 1;
+      try {
+        return await operation();
+      } finally {
+        this.operationDepth -= 1;
+      }
+    };
+    const next = this.operationQueue.catch(() => {}).then(run);
+    this.operationQueue = next.catch(() => {});
+
+    return next;
   }
 
   async #startRepl() {
@@ -925,22 +984,32 @@ export class PybricksHubClient extends EventTarget {
     });
   }
 
-  #waitForMotorSweep(nonce, timeoutMs) {
+  #waitForMotorSweep(nonce, timeoutMs, pointsTotal) {
     return new Promise((resolve, reject) => {
       const timeoutId = window.setTimeout(() => {
         cleanup();
         const result = parseMotorSweepOutput(this.stdout, nonce);
+        const progress = parseMotorSweepProgress(this.stdout, nonce, pointsTotal);
+        const error = new Error(
+          `Motor test timed out at ${progress.pointsDone}/${progress.pointsTotal || "?"} samples. Last hub output: ${
+            this.#stdoutPreview() || "none"
+          }`
+        );
 
-        if (result.points.length) {
-          resolve(result);
-          return;
-        }
-
-        reject(new Error(`Timed out waiting for motor test output. Last hub output: ${this.#stdoutPreview() || "none"}`));
+        error.partialResult = {
+          ...result,
+          sampleIntervalMs: MOTOR_SWEEP_SETTLE_MS
+        };
+        error.progress = { ...progress, phase: "timed-out", percent: progress.percent };
+        this.#dispatchMotorProgress("timed-out", progress.percent, progress.pointsDone, progress.pointsTotal);
+        reject(error);
       }, timeoutMs);
 
       const onStdout = () => {
         const result = parseMotorSweepOutput(this.stdout, nonce);
+        const progress = parseMotorSweepProgress(this.stdout, nonce, pointsTotal);
+
+        this.#dispatchMotorProgress(progress.phase, progress.percent, progress.pointsDone, progress.pointsTotal);
 
         if (!result.complete) {
           return;
@@ -949,15 +1018,18 @@ export class PybricksHubClient extends EventTarget {
         cleanup();
 
         if (result.error) {
+          this.#dispatchMotorProgress("error", progress.percent, progress.pointsDone, progress.pointsTotal);
           reject(new Error(`Motor test failed: ${result.error}`));
           return;
         }
 
         if (!result.points.length) {
+          this.#dispatchMotorProgress("error", progress.percent, progress.pointsDone, progress.pointsTotal);
           reject(new Error(`Motor test completed without data. Last hub output: ${this.#stdoutPreview() || "none"}`));
           return;
         }
 
+        this.#dispatchMotorProgress("complete", 100, progress.pointsDone, progress.pointsTotal);
         resolve(result);
       };
 
@@ -968,6 +1040,19 @@ export class PybricksHubClient extends EventTarget {
 
       this.addEventListener("stdout", onStdout);
     });
+  }
+
+  #dispatchMotorProgress(phase, percent, pointsDone, pointsTotal) {
+    this.dispatchEvent(
+      new CustomEvent("motor-progress", {
+        detail: {
+          phase,
+          percent: Math.max(0, Math.min(100, Math.round(Number(percent) || 0))),
+          pointsDone,
+          pointsTotal
+        }
+      })
+    );
   }
 
   #applyScanMetadata(result) {

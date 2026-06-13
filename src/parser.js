@@ -70,7 +70,7 @@ export const DEVICE_NAMES = Object.freeze({
 export const LIVE_DEVICE_PROFILES = Object.freeze({
   37: {
     kind: "color-distance",
-    modes: ["reflection", "ambient", "hsv", "rgb", "color"]
+    modes: ["reflection", "distance", "ambient", "hsv", "rgb", "color"]
   },
   38: {
     kind: "motor",
@@ -576,5 +576,37 @@ export function parseMotorSweepOutput(text, nonce) {
     error,
     points,
     metrics
+  };
+}
+
+export function parseMotorSweepProgress(text, nonce, pointsTotal = 0) {
+  const result = parseMotorSweepOutput(text, nonce);
+  const safePointsTotal = Math.max(0, Number(pointsTotal) || 0);
+  const pointsDone = safePointsTotal ? Math.min(result.points.length, safePointsTotal) : result.points.length;
+  const hasBacklash = result.metrics.backlash.status !== "not_run";
+  let phase = "sweeping";
+  let percent = safePointsTotal ? Math.round((pointsDone / safePointsTotal) * 90) : 0;
+
+  if (result.error) {
+    phase = "error";
+    percent = Math.max(percent, 0);
+  } else if (result.complete) {
+    phase = "complete";
+    percent = 100;
+  } else if (hasBacklash || (safePointsTotal > 0 && pointsDone >= safePointsTotal)) {
+    phase = "backlash";
+    percent = 95;
+  } else {
+    percent = Math.max(5, percent);
+  }
+
+  return {
+    phase,
+    percent: Math.max(0, Math.min(100, percent)),
+    pointsDone,
+    pointsTotal: safePointsTotal,
+    complete: result.complete,
+    error: result.error,
+    partialResult: result
   };
 }

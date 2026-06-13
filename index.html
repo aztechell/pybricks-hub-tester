@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Pybricks Hub Tester</title>
-    <link rel="stylesheet" href="./styles.css" />
+    <link rel="stylesheet" href="./styles.css?v=20260613-1" />
   </head>
   <body>
     <div class="app-shell">
@@ -157,6 +157,15 @@
               <button id="downloadMotorChartBtn" class="button motor-test-button" type="button" disabled>Download PNG</button>
               <span id="motorTestStatus" class="motor-test-status">No motor selected</span>
             </div>
+            <div id="motorProgress" class="motor-progress" aria-label="Motor test progress" hidden>
+              <div class="motor-progress__header">
+                <span id="motorProgressPhase">Preparing</span>
+                <span id="motorProgressPercent">0%</span>
+              </div>
+              <div class="motor-progress__track" aria-hidden="true">
+                <div id="motorProgressFill" class="motor-progress__fill"></div>
+              </div>
+            </div>
             <div id="motorSummary" class="motor-summary" aria-label="Motor test summary"></div>
             <div class="motor-charts">
               <section class="motor-chart-card" aria-label="DC to RPM">
@@ -178,6 +187,6 @@
       </section>
     </div>
 
-    <script type="module" src="./src/main.js"></script>
+    <script type="module" src="./src/main.js?v=20260613-1"></script>
   </body>
 </html>
