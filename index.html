@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Pybricks Hub Tester</title>
-    <link rel="stylesheet" href="./styles.css?v=20260613-1" />
+    <link rel="stylesheet" href="./styles.css?v=20260615-1" />
   </head>
   <body>
     <div class="app-shell">
@@ -80,6 +80,7 @@
         <nav class="dashboard-tabs" aria-label="Hub views">
           <button class="tab tab--active" type="button" data-tab="dashboard" aria-selected="true">Dashboard</button>
           <button class="tab" type="button" data-tab="motor-test" aria-selected="false">Motor Test</button>
+          <button class="tab" type="button" data-tab="motor-control" aria-selected="false">Motor Control</button>
         </nav>
 
         <main class="dashboard-stage">
@@ -182,11 +183,93 @@
               </section>
             </div>
           </section>
+          <section class="tab-panel motor-control-panel" data-tab-panel="motor-control" hidden>
+            <div class="motor-control-controls">
+              <label class="field-label" for="motorControlPortSelect">Port</label>
+              <select id="motorControlPortSelect" class="field-control"></select>
+
+              <label class="field-label" for="motorControlSpeedInput">Speed</label>
+              <input id="motorControlSpeedInput" class="field-control field-control--number" type="number" min="1" step="10" value="360" />
+              <span class="field-unit">deg/s</span>
+              <span id="motorControlStatus" class="motor-control-status">No motor selected</span>
+              <span id="motorControlAngle" class="motor-control-angle">Angle: -</span>
+              <span id="motorControlResult" class="motor-control-result" role="status" aria-live="polite">Ready</span>
+            </div>
+
+            <div class="motor-control-actions" aria-label="Motor actions">
+              <section class="motor-action">
+                <div class="motor-action__header">
+                  <h2>Zero</h2>
+                </div>
+                <div class="motor-action__buttons">
+                  <button id="motorControlGoZeroBtn" class="button button--primary motor-control-button" type="button" disabled>Go to 0</button>
+                  <button id="motorControlResetZeroBtn" class="button motor-control-button" type="button" disabled>Reset Zero</button>
+                </div>
+              </section>
+
+              <section class="motor-action">
+                <div class="motor-action__header">
+                  <h2>Degrees</h2>
+                </div>
+                <div class="motor-action__fields">
+                  <input id="motorControlDegreesInput" class="field-control field-control--number" type="number" step="1" value="90" />
+                  <span class="field-unit">deg</span>
+                  <button id="motorControlMoveDegreesBtn" class="button button--primary motor-control-button" type="button" disabled>Move</button>
+                </div>
+              </section>
+
+              <section class="motor-action">
+                <div class="motor-action__header">
+                  <h2>Target Angle</h2>
+                </div>
+                <div class="motor-action__fields">
+                  <input id="motorControlTargetInput" class="field-control field-control--number" type="number" step="1" value="0" />
+                  <span class="field-unit">deg</span>
+                  <button id="motorControlMoveTargetBtn" class="button button--primary motor-control-button" type="button" disabled>Move</button>
+                </div>
+              </section>
+
+              <section class="motor-action">
+                <div class="motor-action__header">
+                  <h2>Revolutions</h2>
+                </div>
+                <div class="motor-action__fields">
+                  <input id="motorControlRevolutionsInput" class="field-control field-control--number" type="number" step="0.25" value="1" />
+                  <span class="field-unit">rev</span>
+                  <button id="motorControlMoveRevolutionsBtn" class="button button--primary motor-control-button" type="button" disabled>Move</button>
+                </div>
+              </section>
+
+              <section class="motor-action motor-action--wide">
+                <div class="motor-action__header">
+                  <h2>Distance</h2>
+                </div>
+                <div class="motor-action__fields motor-action__fields--distance">
+                  <label class="field-label" for="motorControlDistanceInput">Distance</label>
+                  <input id="motorControlDistanceInput" class="field-control field-control--number" type="number" step="0.1" value="10" />
+                  <select id="motorControlDistanceUnit" class="field-control">
+                    <option value="cm" selected>cm</option>
+                    <option value="mm">mm</option>
+                  </select>
+
+                  <label class="field-label" for="motorControlWheelDiameterInput">Wheel diameter</label>
+                  <input id="motorControlWheelDiameterInput" class="field-control field-control--number" type="number" min="0.1" step="0.1" value="62.4" />
+                  <span class="field-unit">mm</span>
+
+                  <label class="field-label" for="motorControlGearRatioInput">Motor:Wheel ratio</label>
+                  <input id="motorControlGearRatioInput" class="field-control field-control--number" type="number" min="0.1" step="0.1" value="1" />
+                  <span id="motorControlDistancePreview" class="motor-control-preview">360 deg</span>
+                  <button id="motorControlMoveDistanceBtn" class="button button--primary motor-control-button" type="button" disabled>Move Distance</button>
+                </div>
+              </section>
+            </div>
+
+          </section>
           <div id="messageBox" class="message-box" role="status" aria-live="polite"></div>
         </main>
       </section>
     </div>
 
-    <script type="module" src="./src/main.js?v=20260613-1"></script>
+    <script type="module" src="./src/main.js?v=20260615-1"></script>
   </body>
 </html>

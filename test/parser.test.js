@@ -5,8 +5,10 @@ import {
   estimateBatteryPercentFromVoltage,
   liveModesForDeviceId,
   makeInitialPorts,
+  motorDistanceToDegrees,
   parseHubCapabilities,
   parseLiveOutput,
+  parseMotorControlOutput,
   parseMotorSweepProgress,
   parseMotorSweepOutput,
   parsePnpId,
@@ -430,5 +432,55 @@ describe("parser", () => {
 
     assert.equal(result.complete, false);
     assert.equal(parseMotorSweepProgress(output, "m1", 2).phase, "backlash");
+  });
+
+  it("parses motor control success output", () => {
+    assert.deepEqual(parseMotorControlOutput("MC:c1:OK:90:0:0", "c1"), {
+      complete: true,
+      status: "ok",
+      error: null,
+      angle: 90,
+      speed: 0,
+      stalled: false
+    });
+  });
+
+  it("parses motor control error output", () => {
+    assert.deepEqual(parseMotorControlOutput("MC:c1:ERR:OSError", "c1"), {
+      complete: true,
+      status: "error",
+      error: "OSError",
+      angle: null,
+      speed: null,
+      stalled: null
+    });
+  });
+
+  it("ignores motor control output for another nonce", () => {
+    assert.deepEqual(parseMotorControlOutput("MC:other:OK:90:0:0", "c1"), {
+      complete: false,
+      status: null,
+      error: null,
+      angle: null,
+      speed: null,
+      stalled: null
+    });
+  });
+
+  it("converts wheel travel to motor degrees", () => {
+    const circumferenceMm = Math.PI * 56;
+
+    assert.ok(Math.abs(motorDistanceToDegrees({
+      distance: circumferenceMm / 10,
+      distanceUnit: "cm",
+      wheelDiameterMm: 56,
+      gearRatio: 1
+    }) - 360) < 0.000001);
+    assert.ok(Math.abs(motorDistanceToDegrees({
+      distance: circumferenceMm,
+      distanceUnit: "mm",
+      wheelDiameterMm: 56,
+      gearRatio: 3
+    }) - 1080) < 0.000001);
   });
 });

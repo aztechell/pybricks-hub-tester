@@ -1,11 +1,12 @@
-import { PybricksHubClient } from "./pybricks.js?v=20260613-1";
+import { PybricksHubClient } from "./pybricks.js?v=20260615-1";
 import {
   estimateBatteryPercentFromVoltage,
   isMotorDeviceId,
   liveModesForDeviceId,
   makeInitialPorts,
+  motorDistanceToDegrees,
   PORT_NAMES
-} from "./parser.js?v=20260613-1";
+} from "./parser.js?v=20260615-1";
 
 const connectBtn = document.querySelector("#connectBtn");
 const refreshBtn = document.querySelector("#refreshBtn");
@@ -46,8 +47,46 @@ const motorProgressFill = document.querySelector("#motorProgressFill");
 const motorSummary = document.querySelector("#motorSummary");
 const motorChart = document.querySelector("#motorChart");
 const motorCurrentChart = document.querySelector("#motorCurrentChart");
+const motorControlPortSelect = document.querySelector("#motorControlPortSelect");
+const motorControlSpeedInput = document.querySelector("#motorControlSpeedInput");
+const motorControlStatus = document.querySelector("#motorControlStatus");
+const motorControlAngle = document.querySelector("#motorControlAngle");
+const motorControlGoZeroBtn = document.querySelector("#motorControlGoZeroBtn");
+const motorControlResetZeroBtn = document.querySelector("#motorControlResetZeroBtn");
+const motorControlDegreesInput = document.querySelector("#motorControlDegreesInput");
+const motorControlMoveDegreesBtn = document.querySelector("#motorControlMoveDegreesBtn");
+const motorControlTargetInput = document.querySelector("#motorControlTargetInput");
+const motorControlMoveTargetBtn = document.querySelector("#motorControlMoveTargetBtn");
+const motorControlRevolutionsInput = document.querySelector("#motorControlRevolutionsInput");
+const motorControlMoveRevolutionsBtn = document.querySelector("#motorControlMoveRevolutionsBtn");
+const motorControlDistanceInput = document.querySelector("#motorControlDistanceInput");
+const motorControlDistanceUnit = document.querySelector("#motorControlDistanceUnit");
+const motorControlWheelDiameterInput = document.querySelector("#motorControlWheelDiameterInput");
+const motorControlGearRatioInput = document.querySelector("#motorControlGearRatioInput");
+const motorControlDistancePreview = document.querySelector("#motorControlDistancePreview");
+const motorControlMoveDistanceBtn = document.querySelector("#motorControlMoveDistanceBtn");
+const motorControlResult = document.querySelector("#motorControlResult");
 const portModeMenu = document.querySelector("#portModeMenu");
 const hubPortLabels = [...document.querySelectorAll("[data-hub-port]")];
+const motorControlActionButtons = [
+  motorControlGoZeroBtn,
+  motorControlResetZeroBtn,
+  motorControlMoveDegreesBtn,
+  motorControlMoveTargetBtn,
+  motorControlMoveRevolutionsBtn,
+  motorControlMoveDistanceBtn
+];
+const motorControlInputs = [
+  motorControlPortSelect,
+  motorControlSpeedInput,
+  motorControlDegreesInput,
+  motorControlTargetInput,
+  motorControlRevolutionsInput,
+  motorControlDistanceInput,
+  motorControlDistanceUnit,
+  motorControlWheelDiameterInput,
+  motorControlGearRatioInput
+];
 
 const client = new PybricksHubClient();
 
@@ -112,6 +151,20 @@ const state = {
       pointsDone: 0,
       pointsTotal: 0
     }
+  },
+  motorControl: {
+    running: false,
+    selectedPort: "",
+    speed: 360,
+    degrees: 90,
+    targetAngle: 0,
+    revolutions: 1,
+    distance: 10,
+    distanceUnit: "cm",
+    wheelDiameterMm: 62.4,
+    gearRatio: 1,
+    status: "idle",
+    result: null
   },
   message: "",
   error: ""
@@ -983,6 +1036,260 @@ function renderMotorTest() {
   renderMotorCharts();
 }
 
+function motorControlNumber(input, label) {
+  const value = Number(input.value);
+
+  if (!Number.isFinite(value)) {
+    throw new Error(`${label} must be a finite number.`);
+  }
+
+  return value;
+}
+
+function motorControlDistanceDegrees() {
+  return motorDistanceToDegrees({
+    distance: state.motorControl.distance,
+    distanceUnit: state.motorControl.distanceUnit,
+    wheelDiameterMm: state.motorControl.wheelDiameterMm,
+    gearRatio: state.motorControl.gearRatio
+  });
+}
+
+function formatMotorControlNumber(value, unit = "") {
+  const number = Number(value);
+
+  if (!Number.isFinite(number)) {
+    return "-";
+  }
+
+  const text = Math.abs(number) >= 10 || Number.isInteger(number)
+    ? String(Math.round(number))
+    : number.toFixed(1).replace(/\.0$/, "");
+
+  return `${text}${unit}`;
+}
+
+function motorControlCurrentAngleText() {
+  const portName = state.motorControl.selectedPort || motorControlPortSelect.value;
+  const port = portByName(portName);
+  const reading = portName ? state.liveValues.get(liveValueKey(portName, "angle")) : null;
+
+  if (reading?.status === "value") {
+    return `Angle: ${formatLiveValue(reading, port)}`;
+  }
+
+  if (state.motorControl.result) {
+    return `Angle: ${formatMotorControlNumber(state.motorControl.result.angle, "\u00b0")}`;
+  }
+
+  return "Angle: -";
+}
+
+function updateMotorControlStateFromInputs() {
+  state.motorControl.selectedPort = motorControlPortSelect.value || state.motorControl.selectedPort;
+  state.motorControl.speed = motorControlNumber(motorControlSpeedInput, "Speed");
+  state.motorControl.degrees = motorControlNumber(motorControlDegreesInput, "Degrees");
+  state.motorControl.targetAngle = motorControlNumber(motorControlTargetInput, "Target angle");
+  state.motorControl.revolutions = motorControlNumber(motorControlRevolutionsInput, "Revolutions");
+  state.motorControl.distance = motorControlNumber(motorControlDistanceInput, "Distance");
+  state.motorControl.distanceUnit = motorControlDistanceUnit.value;
+  state.motorControl.wheelDiameterMm = motorControlNumber(motorControlWheelDiameterInput, "Wheel diameter");
+  state.motorControl.gearRatio = motorControlNumber(motorControlGearRatioInput, "Motor:Wheel ratio");
+
+  if (state.motorControl.speed <= 0) {
+    throw new Error("Speed must be greater than 0.");
+  }
+
+  if (state.motorControl.wheelDiameterMm <= 0) {
+    throw new Error("Wheel diameter must be greater than 0.");
+  }
+
+  if (state.motorControl.gearRatio <= 0) {
+    throw new Error("Motor:Wheel ratio must be greater than 0.");
+  }
+}
+
+function renderMotorControl() {
+  const motors = motorPorts();
+  const previous = state.motorControl.selectedPort || motorControlPortSelect.value;
+  const isDisabled = state.busy || state.motorControl.running || !state.connected || !motors.length;
+  const isEditing = motorControlInputs.includes(document.activeElement);
+
+  motorControlPortSelect.replaceChildren(
+    ...motors.map((port) => {
+      const option = document.createElement("option");
+      option.value = port.port;
+      option.textContent = `${port.port} - ${port.deviceName || `ID ${port.deviceId}`}`;
+      return option;
+    })
+  );
+
+  if (motors.some((port) => port.port === previous)) {
+    motorControlPortSelect.value = previous;
+  } else if (motors.length) {
+    motorControlPortSelect.value = motors[0].port;
+  }
+
+  state.motorControl.selectedPort = motorControlPortSelect.value || "";
+
+  if (!isEditing) {
+    motorControlSpeedInput.value = String(state.motorControl.speed);
+    motorControlDegreesInput.value = String(state.motorControl.degrees);
+    motorControlTargetInput.value = String(state.motorControl.targetAngle);
+    motorControlRevolutionsInput.value = String(state.motorControl.revolutions);
+    motorControlDistanceInput.value = String(state.motorControl.distance);
+    motorControlDistanceUnit.value = state.motorControl.distanceUnit;
+    motorControlWheelDiameterInput.value = String(state.motorControl.wheelDiameterMm);
+    motorControlGearRatioInput.value = String(state.motorControl.gearRatio);
+  }
+
+  for (const input of motorControlInputs) {
+    input.disabled = isDisabled;
+  }
+
+  for (const button of motorControlActionButtons) {
+    button.disabled = isDisabled || !state.motorControl.selectedPort;
+  }
+
+  try {
+    const degrees = motorControlDistanceDegrees();
+    motorControlDistancePreview.textContent = `${formatMotorControlNumber(degrees, " deg")} motor`;
+  } catch {
+    motorControlDistancePreview.textContent = "-";
+  }
+
+  if (state.motorControl.running) {
+    motorControlStatus.textContent = "Running";
+  } else if (!state.connected) {
+    motorControlStatus.textContent = "Disconnected";
+  } else if (!motors.length) {
+    motorControlStatus.textContent = "No motor selected";
+  } else {
+    motorControlStatus.textContent = "Ready";
+  }
+
+  motorControlAngle.textContent = motorControlCurrentAngleText();
+
+  if (state.motorControl.result) {
+    const result = state.motorControl.result;
+    motorControlResult.textContent = `Angle ${formatMotorControlNumber(result.angle, "\u00b0")}, speed ${formatMotorControlNumber(result.speed, "\u00b0/s")}, stalled ${result.stalled ? "yes" : "no"}`;
+  } else {
+    motorControlResult.textContent = state.motorControl.running ? "Running motor command..." : "Ready";
+  }
+}
+
+function motorControlCommandForAction(action) {
+  state.motorControl.selectedPort = motorControlPortSelect.value || state.motorControl.selectedPort;
+  state.motorControl.speed = motorControlNumber(motorControlSpeedInput, "Speed");
+
+  if (state.motorControl.speed <= 0) {
+    throw new Error("Speed must be greater than 0.");
+  }
+
+  const base = {
+    port: state.motorControl.selectedPort,
+    action,
+    speed: state.motorControl.speed
+  };
+
+  if (!base.port) {
+    throw new Error("Select a motor port.");
+  }
+
+  if (action === "move-degrees") {
+    state.motorControl.degrees = motorControlNumber(motorControlDegreesInput, "Degrees");
+
+    return {
+      ...base,
+      value: state.motorControl.degrees
+    };
+  }
+
+  if (action === "move-to-angle") {
+    state.motorControl.targetAngle = motorControlNumber(motorControlTargetInput, "Target angle");
+
+    return {
+      ...base,
+      value: state.motorControl.targetAngle
+    };
+  }
+
+  if (action === "move-revolutions") {
+    state.motorControl.revolutions = motorControlNumber(motorControlRevolutionsInput, "Revolutions");
+
+    return {
+      ...base,
+      value: state.motorControl.revolutions
+    };
+  }
+
+  if (action === "move-distance") {
+    state.motorControl.distance = motorControlNumber(motorControlDistanceInput, "Distance");
+    state.motorControl.distanceUnit = motorControlDistanceUnit.value;
+    state.motorControl.wheelDiameterMm = motorControlNumber(motorControlWheelDiameterInput, "Wheel diameter");
+    state.motorControl.gearRatio = motorControlNumber(motorControlGearRatioInput, "Motor:Wheel ratio");
+
+    if (state.motorControl.wheelDiameterMm <= 0) {
+      throw new Error("Wheel diameter must be greater than 0.");
+    }
+
+    if (state.motorControl.gearRatio <= 0) {
+      throw new Error("Motor:Wheel ratio must be greater than 0.");
+    }
+
+    return {
+      ...base,
+      value: state.motorControl.distance,
+      distanceUnit: state.motorControl.distanceUnit,
+      wheelDiameterMm: state.motorControl.wheelDiameterMm,
+      gearRatio: state.motorControl.gearRatio
+    };
+  }
+
+  return base;
+}
+
+async function runMotorControl(action) {
+  let command;
+
+  try {
+    command = motorControlCommandForAction(action);
+  } catch (error) {
+    state.motorControl.status = "error";
+    state.motorControl.result = null;
+    setMessage(error.message || String(error), true);
+    renderMotorControl();
+    return;
+  }
+
+  state.motorControl.running = true;
+  state.motorControl.status = "running";
+  state.motorControl.result = null;
+  setBusy(true, "Motor control");
+  setMessage("");
+  closeModeMenu(false);
+  renderMotorControl();
+
+  try {
+    const result = await client.runMotorControl(command);
+    state.motorControl.status = "complete";
+    state.motorControl.result = result;
+    setConnectionState("Connected", "ready");
+    renderMotorControl();
+    await client.startLiveMonitor(state.ports, liveMonitorOptions()).catch(() => {});
+  } catch (error) {
+    state.motorControl.status = "error";
+    state.motorControl.result = null;
+    setConnectionState("Connected", "ready");
+    setMessage(error.message || String(error), true);
+    await client.startLiveMonitor(state.ports, liveMonitorOptions()).catch(() => {});
+  } finally {
+    state.motorControl.running = false;
+    setBusy(false);
+    renderHub();
+  }
+}
+
 async function downloadMotorChartPng() {
   if (!state.motorTest.data.length) {
     return;
@@ -1443,6 +1750,7 @@ function renderHub() {
   hubThumbImage.alt = "";
   renderPorts();
   renderMotorTest();
+  renderMotorControl();
   renderModeMenu();
 }
 
@@ -1471,6 +1779,10 @@ function resetUiAfterDisconnect() {
     pointsDone: 0,
     pointsTotal: 0
   });
+  state.motorControl.running = false;
+  state.motorControl.selectedPort = "";
+  state.motorControl.status = "idle";
+  state.motorControl.result = null;
   scanStamp.textContent = "Not scanned";
   setConnectionState("Disconnected", "idle");
   setBusy(false);
@@ -1496,6 +1808,7 @@ async function refreshPorts() {
     state.ports = mergePorts(ports);
     syncLiveModesForPorts();
     renderMotorTest();
+    renderMotorControl();
     scanStamp.textContent = `Scanned ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
     setConnectionState("Connected", "ready");
     renderHub();
@@ -1633,6 +1946,27 @@ downloadMotorChartBtn.addEventListener("click", () => {
     setMessage(error.message || String(error), true);
   });
 });
+
+for (const input of motorControlInputs) {
+  input.addEventListener("change", () => {
+    try {
+      updateMotorControlStateFromInputs();
+      if (!state.error) {
+        setMessage("");
+      }
+    } catch {
+      // Keep validation messages for the Run action; change only refreshes derived UI.
+    }
+    renderMotorControl();
+  });
+}
+
+motorControlGoZeroBtn.addEventListener("click", () => runMotorControl("go-zero"));
+motorControlResetZeroBtn.addEventListener("click", () => runMotorControl("reset-zero"));
+motorControlMoveDegreesBtn.addEventListener("click", () => runMotorControl("move-degrees"));
+motorControlMoveTargetBtn.addEventListener("click", () => runMotorControl("move-to-angle"));
+motorControlMoveRevolutionsBtn.addEventListener("click", () => runMotorControl("move-revolutions"));
+motorControlMoveDistanceBtn.addEventListener("click", () => runMotorControl("move-distance"));
 
 hubDashboard.addEventListener("click", (event) => {
   const target = event.target instanceof Element ? event.target : null;

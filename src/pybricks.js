@@ -2,8 +2,10 @@ import {
   estimateBatteryPercentFromVoltage,
   HUB_CAPABILITY,
   liveModesForDeviceId,
+  motorDistanceToDegrees,
   parseHubCapabilities,
   parseLiveOutput,
+  parseMotorControlOutput,
   parseMotorSweepProgress,
   parseMotorSweepOutput,
   parsePnpId,
@@ -12,7 +14,7 @@ import {
   resolveHubModel,
   supportsWriteStdin,
   usesBuiltinRepl
-} from "./parser.js?v=20260613-1";
+} from "./parser.js?v=20260615-1";
 
 const PYBRICKS_SERVICE_UUID = "c5f50001-8280-46da-89f4-6d8051e4aeef";
 const PYBRICKS_COMMAND_EVENT_UUID = "c5f50002-8280-46da-89f4-6d8051e4aeef";
@@ -79,6 +81,14 @@ const MOTOR_BACKLASH_DUTY = 28;
 const MOTOR_BACKLASH_LOAD_THRESHOLD_MNM = 5;
 
 const MOTOR_DEVICE_IDS = Object.freeze([38, 46, 47, 48, 49, 65, 75, 76]);
+const MOTOR_CONTROL_ACTIONS = Object.freeze([
+  "go-zero",
+  "reset-zero",
+  "move-degrees",
+  "move-to-angle",
+  "move-revolutions",
+  "move-distance"
+]);
 
 const LIVE_DEVICE_CLASS_BY_ID = Object.freeze({
   37: "ColorDistanceSensor",
@@ -172,6 +182,81 @@ function makePythonTuple(items) {
   }
 
   return `(${items.join(",")})`;
+}
+
+function pythonNumber(value) {
+  const number = Number(value);
+
+  if (!Number.isFinite(number) || Object.is(number, -0)) {
+    return "0";
+  }
+
+  return number.toFixed(6).replace(/\.?0+$/, "");
+}
+
+function normalizeMotorControlCommand(command) {
+  const port = String(command?.port ?? "").toUpperCase();
+  const action = String(command?.action ?? "");
+  const speed = Number(command?.speed);
+  let pythonAction = "angle";
+  let degrees = 0;
+
+  if (!["A", "B", "C", "D", "E", "F"].includes(port)) {
+    throw new Error("Select a motor port.");
+  }
+
+  if (!MOTOR_CONTROL_ACTIONS.includes(action)) {
+    throw new Error("Select a motor control action.");
+  }
+
+  if (!Number.isFinite(speed) || speed <= 0) {
+    throw new Error("Speed must be greater than 0.");
+  }
+
+  if (action === "go-zero") {
+    pythonAction = "go-zero";
+  } else if (action === "reset-zero") {
+    pythonAction = "reset-zero";
+  } else if (action === "move-to-angle") {
+    const target = Number(command.value);
+
+    if (!Number.isFinite(target)) {
+      throw new Error("Target angle must be a finite number.");
+    }
+
+    pythonAction = "target";
+    degrees = target;
+  } else if (action === "move-revolutions") {
+    const revolutions = Number(command.value);
+
+    if (!Number.isFinite(revolutions)) {
+      throw new Error("Revolutions must be a finite number.");
+    }
+
+    degrees = revolutions * 360;
+  } else if (action === "move-distance") {
+    degrees = motorDistanceToDegrees({
+      distance: command.value,
+      distanceUnit: command.distanceUnit,
+      wheelDiameterMm: command.wheelDiameterMm,
+      gearRatio: command.gearRatio
+    });
+  } else {
+    const rotation = Number(command.value);
+
+    if (!Number.isFinite(rotation)) {
+      throw new Error("Degrees must be a finite number.");
+    }
+
+    degrees = rotation;
+  }
+
+  return {
+    port,
+    action: pythonAction,
+    speed,
+    degrees
+  };
 }
 
 function makeLiveMonitorProgram(nonce, ports, hubClass, selectedModesByPort = {}) {
@@ -376,6 +461,34 @@ try:
 finally:
     m.stop()
     print("MX:%s"%N)
+`.trim();
+}
+
+function makeMotorControlProgram(nonce, { port, action, speed, degrees }) {
+  const pySpeed = pythonNumber(speed);
+  const pyDegrees = pythonNumber(degrees);
+
+  return `
+from pybricks.parameters import Port, Stop
+from pybricks.pupdevices import Motor
+N="${nonce}"
+try:
+    m=Motor(getattr(Port,"${port}"),reset_angle=False)
+    if "${action}"=="reset-zero":
+        m.reset_angle(0)
+    elif "${action}"=="go-zero":
+        m.run_target(${pySpeed},0,then=Stop.HOLD,wait=True)
+    elif "${action}"=="target":
+        m.run_target(${pySpeed},${pyDegrees},then=Stop.HOLD,wait=True)
+    else:
+        m.run_angle(${pySpeed},${pyDegrees},then=Stop.HOLD,wait=True)
+    try:s=1 if m.stalled() else 0
+    except Exception:s=0
+    print("MC:%s:OK:%s:%s:%s"%(N,m.angle(),m.speed(100),s))
+except Exception as e:
+    try:m.stop()
+    except Exception:pass
+    print("MC:%s:ERR:%s"%(N,type(e).__name__))
 `.trim();
 }
 
@@ -731,6 +844,44 @@ export class PybricksHubClient extends EventTarget {
     }
   }
 
+  async runMotorControl(command) {
+    return this.#enqueueOperation(() => this.#runMotorControl(command));
+  }
+
+  async #runMotorControl(command) {
+    if (!this.connected) {
+      throw new Error("Hub is not connected.");
+    }
+
+    if (!supportsWriteStdin(this.info?.profileVersion)) {
+      throw new Error("Pybricks profile 1.3.0 or newer is required for motor control.");
+    }
+
+    const normalized = normalizeMotorControlCommand(command);
+    await this.#stopLiveMonitor().catch(() => {});
+
+    const nonce = makeNonce();
+    const code = makeMotorControlProgram(nonce, normalized);
+    const motionTimeMs = Math.abs(normalized.degrees) / Math.max(1, normalized.speed) * 1000;
+    const minimumTimeoutMs = normalized.action === "go-zero" || normalized.action === "target" ? 60000 : 15000;
+    const timeoutMs = normalized.action === "reset-zero"
+      ? 10000
+      : Math.max(minimumTimeoutMs, Math.min(120000, motionTimeMs + 12000));
+    const commandText = `\x05${code.replace(/\n/g, "\r\n")}\r\n\x04`;
+
+    try {
+      await this.#startFreshRepl();
+      this.stdout = "";
+      const resultPromise = this.#waitForMotorControl(nonce, timeoutMs);
+      await this.writeStdin(commandText, `send motor control (${normalized.port})`, LIVE_MONITOR_WRITE);
+      return await resultPromise;
+    } finally {
+      await this.writeCommand(COMMAND.STOP_USER_PROGRAM, undefined, "stop motor control").catch(() => {});
+      this.stdout = "";
+      this.stdoutDecoder = new TextDecoder();
+    }
+  }
+
   async writeStdin(text, context = "send stdin", options = SAFE_STDIN_WRITE) {
     const bytes = new TextEncoder().encode(text);
     const requestedChunkSize = options.chunkSize ?? SAFE_STDIN_WRITE.chunkSize;
@@ -1053,6 +1204,39 @@ export class PybricksHubClient extends EventTarget {
         }
       })
     );
+  }
+
+  #waitForMotorControl(nonce, timeoutMs) {
+    return new Promise((resolve, reject) => {
+      const timeoutId = window.setTimeout(() => {
+        cleanup();
+        reject(new Error(`Timed out waiting for motor control output. Last hub output: ${this.#stdoutPreview() || "none"}`));
+      }, timeoutMs);
+
+      const onStdout = () => {
+        const result = parseMotorControlOutput(this.stdout, nonce);
+
+        if (!result.complete) {
+          return;
+        }
+
+        cleanup();
+
+        if (result.status === "error") {
+          reject(new Error(`Motor control failed: ${result.error}`));
+          return;
+        }
+
+        resolve(result);
+      };
+
+      const cleanup = () => {
+        window.clearTimeout(timeoutId);
+        this.removeEventListener("stdout", onStdout);
+      };
+
+      this.addEventListener("stdout", onStdout);
+    });
   }
 
   #applyScanMetadata(result) {

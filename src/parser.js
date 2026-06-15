@@ -610,3 +610,77 @@ export function parseMotorSweepProgress(text, nonce, pointsTotal = 0) {
     partialResult: result
   };
 }
+
+export function parseMotorControlOutput(text, nonce) {
+  for (const rawLine of String(text).split(/[\r\n]+/)) {
+    const line = rawLine.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "").trim();
+    const parts = line.split(":");
+
+    if (parts.length < 3 || parts[0] !== "MC" || parts[1] !== nonce) {
+      continue;
+    }
+
+    if (parts[2] === "ERR") {
+      return {
+        complete: true,
+        status: "error",
+        error: parts.slice(3).join(":") || "Motor control failed",
+        angle: null,
+        speed: null,
+        stalled: null
+      };
+    }
+
+    if (parts[2] !== "OK") {
+      continue;
+    }
+
+    const angle = Number(parts[3]);
+    const speed = Number(parts[4]);
+    const stalledRaw = String(parts[5] ?? "").toLowerCase();
+
+    return {
+      complete: true,
+      status: "ok",
+      error: null,
+      angle: Number.isFinite(angle) ? angle : null,
+      speed: Number.isFinite(speed) ? speed : null,
+      stalled: stalledRaw === "1" || stalledRaw === "true"
+    };
+  }
+
+  return {
+    complete: false,
+    status: null,
+    error: null,
+    angle: null,
+    speed: null,
+    stalled: null
+  };
+}
+
+export function motorDistanceToDegrees({ distance, distanceUnit = "cm", wheelDiameterMm, gearRatio = 1 }) {
+  const distanceValue = Number(distance);
+  const diameterValue = Number(wheelDiameterMm);
+  const ratioValue = Number(gearRatio);
+
+  if (!Number.isFinite(distanceValue)) {
+    throw new TypeError("Distance must be a finite number.");
+  }
+
+  if (!Number.isFinite(diameterValue) || diameterValue <= 0) {
+    throw new TypeError("Wheel diameter must be greater than 0.");
+  }
+
+  if (!Number.isFinite(ratioValue) || ratioValue <= 0) {
+    throw new TypeError("Gear ratio must be greater than 0.");
+  }
+
+  const distanceMm = distanceUnit === "cm" ? distanceValue * 10 : distanceValue;
+
+  if (distanceUnit !== "cm" && distanceUnit !== "mm") {
+    throw new TypeError("Distance unit must be cm or mm.");
+  }
+
+  return (distanceMm / (Math.PI * diameterValue)) * 360 * ratioValue;
+}
